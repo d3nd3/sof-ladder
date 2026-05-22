@@ -8,48 +8,51 @@ Default **v1 layout: everything on one game VPS** (simplest). Components can be 
 
 ```mermaid
 flowchart TB
-  subgraph discord [Discord]
-    LadderChannel["#sof-ladder channel\nembed + buttons"]
-    DMs["Player DMs\noffers + connect info"]
-    Slash["Slash commands\n/link /stats /accept"]
+  subgraph player_discord [Player — Discord pathway]
+    Pd((Player))
+    Ch["#sof-ladder embed\nFind 1v1 / Leave / Stats"]
+    Dm["DMs\noffer + connect"]
+    Sl["/link /accept /stats"]
+    Pd --> Ch
+    Pd --> Dm
+    Pd --> Sl
+  end
+
+  subgraph player_ingame [Player — in-game pathway]
+    Pi((Player))
+    Any["Any ladder server\nverify / match / optional hub"]
+    Dot[".ladder join | leave\nstatus | accept"]
+    Pi -->|"UDP + uid cvar"| Any
+    Any --> Dot
   end
 
   subgraph sof_ladder [sof-ladder repo]
-    Bot["bot/main.py\ndiscord.py"]
-    API["backend/main.py\nFastAPI"]
-    DB[("SQLite / Postgres\nplayers matches queue")]
-    Orch["orchestrator/main.py\nspawn + read SoFplus files"]
+    Bot["bot/main.py"]
+    API["FastAPI + DB"]
+    Orch["orchestrator/main.py"]
   end
 
-  subgraph game_host [Wine on game VPS - orchestrator spawns each]
-    MatchSrv["Match servers\nPORT_START..END\n.ladder for specs"]
-    VerifySrv["Verify server\nVERIFY_SERVER_PORT"]
-    HubSrv["Optional hub\nLADDER_HUB_ENABLED"]
-    SoFplus["ladder_report.cfg\nmatch + check + cmd"]
+  subgraph game_host [Wine — orchestrator spawns]
+    NewMatch["New match server\nper paired game"]
+    Verify["Verify server"]
+    SoFplus["ladder_cmd + ladder_check\n+ ladder_match"]
   end
 
-  Players((Players))
-
-  Players --> LadderChannel
-  Players --> Slash
-  Players --> DMs
-  LadderChannel --> Bot
-  Slash --> Bot
-  Bot -->|"Bearer BOT_API_SECRET"| API
-  API --> DB
-  Orch -->|"X-Orchestrator-Secret"| API
-  Orch -->|"spawns per match"| MatchSrv
-  Orch --> VerifySrv
-  Orch -.-> HubSrv
-  MatchSrv --> SoFplus
-  VerifySrv --> SoFplus
-  HubSrv -.-> SoFplus
-  SoFplus -->|"ladder_out/*.cfg"| Orch
-  Orch -.->|"rcon fallback"| MatchSrv
-  Players -->|"UDP .ladder"| MatchSrv
-  Players -->|"UDP .ladder"| VerifySrv
-  Players -->|"UDP verify"| VerifySrv
-  Players -->|"UDP play or spec"| MatchSrv
+  Ch --> Bot
+  Sl --> Bot
+  Dm --> Bot
+  Bot -->|"discord_id"| API
+  Dot --> SoFplus
+  SoFplus -->|"cmd/*.cfg verify/*.cfg"| Orch
+  Orch -->|"ladder_uid → discord_id"| API
+  API --> DB[(DB)]
+  Orch -->|"spawn child sofmp"| NewMatch
+  Orch --> Verify
+  NewMatch --> SoFplus
+  Verify --> SoFplus
+  SoFplus -->|"match exports"| Orch
+  Pi -->|"play ranked match"| NewMatch
+  Pi -->|"spec: .ladder join OK"| NewMatch
 ```
 
 ## Discord vs in-game pathways
@@ -57,19 +60,37 @@ flowchart TB
 Same backend as the overview above; this section maps each step to Discord vs in-game controls. Pick either UI per step — or mix them (e.g. queue in-game, accept via Discord DM).
 
 ```mermaid
-flowchart TB
-  subgraph paths [Player UIs]
-    D["Discord\nembed + /commands + DMs"]
-    G["In-game\n.ladder on ladder servers"]
+flowchart LR
+  subgraph discord_path [Discord — match finding]
+    D1[Find 1v1 / Leave queue]
+    D2[DM Accept or /accept]
+    D3[DM connect IP:port:pw]
+    D1 --> Bot[Discord bot]
+    D2 --> Bot
+    Bot --> API1[API join_queue / accept_match]
+    D3 -.->|read only| Bot
   end
-  subgraph core [Shared backend]
-    API[FastAPI + DB]
-    Orch[Orchestrator]
+
+  subgraph ingame_path [In-game — match finding]
+    G0[Any ladder server\nyou are connected to]
+    G1[".ladder join / leave"]
+    G2[".ladder accept"]
+    G3[".ladder status"]
+    G0 --> G1
+    G0 --> G2
+    G0 --> G3
+    G1 --> Cmd[ladder_cmd.func]
+    G2 --> Cmd
+    G3 --> Cmd
+    Cmd --> File["ladder_out/cmd/*.cfg"]
+    File --> Orch[Orchestrator poll]
+    Orch --> API2[API same endpoints\nvia ladder_uid]
   end
-  D -->|BOT_API_SECRET| API
-  G -->|ladder_out/cmd/*.cfg| Orch
-  Orch --> API
-  Orch --> MatchSrv2[Wine match servers]
+
+  API1 --> Shared[(Shared queue +\nmatches + Elo)]
+  API2 --> Shared
+  Shared --> Spawn[Orchestrator spawns\nNEW match server]
+  Spawn --> Play[Both players connect\nto new server — not queue server]
 ```
 
 | Step | Discord | In-game | Notes |
@@ -80,6 +101,8 @@ flowchart TB
 | **Accept offer** | DM **Accept** or `/accept <id>` | `.ladder accept` | Same match; both must accept before server spawns |
 | **Connect to match** | DM with password | `.ladder status` after accept | Same `SERVER_CONNECT_IP` + assigned port |
 | **Play / Elo** | — | — | Orchestrator only; no player UI |
+
+**One account, both UIs:** See [Unique players, mixed Discord + in-game](#unique-players-mixed-discord--in-game) — you are **not** required to stay on Discord if you queued in-game, or vice versa.
 
 **How in-game reaches the API:** `.ladder` runs on the SoF server → [`ladder_cmd.func`](game/sofplus/addons/ladder_cmd.func) writes `ladder_out/cmd/<id>.cfg` → orchestrator [`poll_game_commands`](orchestrator/game_cmd.py) resolves `ladder_uid` → Discord `discord_id` → same service functions the bot uses.
 
@@ -125,45 +148,98 @@ sequenceDiagram
   Note over P: After link: keep only _sp_cl_info_ladder_uid on shortcut
 ```
 
-### Match flow (1v1)
-
-From queue to Elo update (both players must be **verified**). Queue/accept via Discord or `.ladder` on any ladder server ([pathways](#discord-vs-in-game-pathways)). When both accept, the orchestrator **spawns a new match server** (separate Wine process); that is distinct from whatever server you queued from.
+### Match finding — Discord pathway
 
 ```mermaid
 sequenceDiagram
-  participant P1 as Player A
-  participant P2 as Player B
-  participant UI as Discord or .ladder
+  participant PA as Player A
+  participant PB as Player B
+  participant Ch as #sof-ladder embed
+  participant Bot as Discord bot
   participant API as FastAPI
+  participant Orch as Orchestrator
+  participant New as New match server
+
+  PA->>Ch: Find 1v1
+  Ch->>Bot: button click
+  Bot->>API: POST /queue/join (discord_id)
+  PB->>Bot: /queue via Find 1v1 or slash
+  Bot->>API: POST /queue/join
+  API->>API: Elo pairing → match_offer
+  Bot->>PA: DM match offer + Accept
+  Bot->>PB: DM match offer + Accept
+  PA->>Bot: Accept
+  Bot->>API: POST /matches/id/accept
+  PB->>Bot: Accept
+  Bot->>API: POST /matches/id/accept
+  API->>API: status → provisioning
+  Orch->>API: GET /internal/matches/active
+  Orch->>New: spawn child sofmp (ladder_matchid)
+  Orch->>API: assign port
+  Bot->>PA: DM IP:port:password
+  Bot->>PB: DM IP:port:password
+  PA->>New: connect
+  PB->>New: connect
+  Note over Orch,New: SoFplus exports → Elo (no Discord)
+```
+
+### Match finding — in-game pathway
+
+Queue/accept from **any** server running `ladder_report.cfg` (spectator on a live match server is OK; the two fighters in that match are blocked). The server you queue from is **not** the ranked match server.
+
+```mermaid
+sequenceDiagram
+  participant PA as Player A
+  participant PB as Player B
+  participant Live as Ladder server connected to
+  participant Cmd as ladder_cmd.func
+  participant Orch as Orchestrator
+  participant API as FastAPI
+  participant New as New match server
+
+  Note over PA,Live: A may be spectator on an old match server
+  PA->>Live: .ladder join
+  Live->>Cmd: .ladder(slot, join)
+  Cmd->>Cmd: save ladder_out/cmd/id.cfg
+  Orch->>Orch: poll_game_commands
+  Orch->>API: join_queue(ladder_uid → discord_id)
+  Cmd->>PA: client msg "queued"
+
+  PB->>Live: .ladder join
+  Orch->>API: join_queue
+  API->>API: Elo pairing → match_offer
+
+  PA->>Live: .ladder accept
+  Orch->>API: accept_match
+  PB->>Live: .ladder accept
+  Orch->>API: accept_match
+  API->>API: provisioning
+
+  Orch->>New: spawn NEW sofmp (separate process)
+  PA->>Live: .ladder status
+  Orch->>API: (via cmd) status shows IP:port
+  PA->>New: connect (leave old server)
+  PB->>New: connect
+  Note over PA,PB: Optional: PB used Discord DM instead of .ladder accept
+  Note over Orch,New: Same exports + Elo as Discord path
+```
+
+### After both connect (shared)
+
+```mermaid
+sequenceDiagram
   participant Orch as Orchestrator
   participant Srv as Match server
   participant SP as ladder_match + ladder_check
+  participant API as FastAPI
 
-  P1->>UI: queue (button or .ladder join)
-  UI->>API: join_queue
-  Note over API: rejects if not verified
-  P2->>UI: queue
-  UI->>API: join_queue
-  API->>API: Elo pairing
-  Note over P1,P2: Offer notify: Discord DM optional
-  P1->>UI: accept
-  P2->>UI: accept
-  UI->>API: accept_match
-  API->>API: status provisioning
-  Orch->>API: GET /internal/matches/active
-  Orch->>Srv: spawn Wine + ladder_matchid
-  Orch->>API: POST port assigned
-  Note over P1,P2: Connect info: Discord DM and/or .ladder status
-  P1->>Srv: connect (+set _sp_cl_info_ladder_uid)
-  P2->>Srv: connect (+set _sp_cl_info_ladder_uid)
-  Srv->>SP: sp_sv_client_check → presence/<uid>.cfg
-  loop Every few seconds
-    Orch->>Orch: read ladder_out/<id>/tmp + result.cfg
-    Orch->>Orch: read ladder_out/presence/*.cfg for uid presence
-    Note over Orch,SP: rcon only if match result export missing
+  loop Monitor
+    Srv->>SP: presence / tmp_player / result.cfg
+    SP->>Orch: ladder_out/*
+    Orch->>Orch: dodge / frags / winner
   end
   Orch->>API: POST /internal/match-result
-  API->>API: Elo update + idle
+  API->>API: Elo update, state idle
 ```
 
 ### Player states (API)
@@ -171,16 +247,17 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
   [*] --> idle
-  note right of idle: must be verified\n(/link + verify server)
-  idle --> queued: Find1v1
-  queued --> idle: LeaveQueue
-  queued --> match_offer: paired
-  match_offer --> in_match: bothAccept
-  match_offer --> cooldown: timeoutOrDecline
-  in_match --> idle: matchFinished
-  in_match --> cooldown: dodgeOrForfeit
+  note right of idle: verified via /link\n+ verify server
+  idle --> queued: Find 1v1 OR .ladder join
+  queued --> idle: Leave queue OR .ladder leave
+  queued --> match_offer: API pairs by Elo
+  match_offer --> in_match: Accept DM OR .ladder accept\n(both players)
+  match_offer --> cooldown: timeout / decline
+  in_match --> idle: match finished
+  in_match --> cooldown: dodge / forfeit
+  note right of in_match: .ladder join blocked\nspectators may queue
   cooldown --> idle: expired
-  idle --> suspended: threeStrikes
+  idle --> suspended: three strikes
 ```
 
 ## Components
@@ -236,11 +313,12 @@ flowchart LR
     Orch1[Orchestrator]
     Game1[Wine SoF servers]
   end
-  Discord[Discord] --> Bot1
+  Discord[Discord] -->|queue accept| Bot1
   Bot1 --> API1
   Orch1 --> API1
   Orch1 --> Game1
-  Players((Players)) --> Game1
+  Players((Players)) -->|UDP .ladder| Game1
+  Players -->|UDP ranked match| Game1
 ```
 
 Set `SERVER_CONNECT_IP` to this VPS **public IP** so connect DMs point players at the right host.
@@ -405,6 +483,68 @@ Match offers and connect info are **not** on this embed — they are sent by **D
 ## Player identity
 
 Discord display names and in-game nicknames are **not** trusted for account binding or match pairing. On `/link`, the API generates a server-side **`ladder_uid`** (`uuid.uuid4()`, stored in the DB) and tells you to copy it into client cvar **`_sp_cl_info_ladder_uid`**; SoFplus **`sp_sv_client_check`** then proves your game client holds that value ([SoFplus manual](https://sof1.megalag.org/sofplus/download/sofplus-manual.html), [`info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func) pattern). The in-game pathway identifies you with the same cvar — not your nickname.
+
+### Unique players, mixed Discord + in-game
+
+There is **one ladder account per human**, not one per UI. The database row is keyed by **`discord_id`** (unique); **`ladder_uid`** (unique UUID) is the cross-game handle read from `_sp_cl_info_ladder_uid`. Matchmaking, queue state, and Elo all use that single row.
+
+**You are not locked to the UI you used first.** Discord and in-game are two ways to call the same API for the same player. Example: queue with **Find 1v1**, accept with **`.ladder accept`**, read connect info from a **DM** or **`.ladder status`** — all valid on one account.
+
+**Exception:** **Account creation** (`/link` + verify server) is **Discord-only**; in-game cannot register a new player without an existing `ladder_uid` on the client.
+
+```mermaid
+flowchart TB
+  subgraph human [One human]
+    H((You))
+  end
+
+  subgraph bind_once [Bind once — Discord only]
+    H -->|/link| DiscordUI[Discord bot]
+    DiscordUI -->|POST link/start| API1[API]
+    API1 --> Row[(players row)]
+    API1 -->|uuid.uuid4| UID[ladder_uid]
+    UID --> Row
+    H -->|copy +set| Cvar["_sp_cl_info_ladder_uid\non game PC"]
+    Cvar -->|verify server\nsp_sv_client_check| Row
+  end
+
+  subgraph row_keys [What makes you unique]
+    Row --- K1["discord_id UNIQUE\nprimary for bot"]
+    Row --- K2["ladder_uid UNIQUE\nprimary for in-game"]
+    Row --- K3["state, elo, active_match_id\none queue slot"]
+  end
+
+  subgraph anytime [Match finding — use either or both]
+    H --> Dpath[Discord\nembed / DM / slash]
+    H --> Gpath[In-game\n.ladder on any ladder server]
+    Dpath -->|discord_id| API2[API join / leave / accept]
+    Gpath -->|cmd file → ladder_uid| Orch[Orchestrator]
+    Orch -->|lookup ladder_uid → discord_id| API2
+    API2 --> Row
+  end
+
+  subgraph mixed_ok [Allowed mix on same row]
+    M1["Queue: Discord"] --> M3[Same match_offer]
+    M2["Accept: .ladder"] --> M3
+    M4["Connect info: DM or .ladder status"] --> M3
+  end
+
+  Row -.-> mixed_ok
+
+  subgraph not_ok [Not allowed]
+    N1["Second Discord account\nsame PC"] -.->|new discord_id| N2[New row — different person]
+    N3["In-game without uid cvar"] -.->|no row match| N4[not linked error]
+    N5["Pick UI once forever"] -.->|myth| N6[No — row is UI-agnostic]
+  end
+```
+
+| Question | Answer |
+|----------|--------|
+| How are players unique? | One `players` row: **`discord_id`** (who you are on Discord) + **`ladder_uid`** (secret UUID on your game client). |
+| Can I use both Discord and in-game? | **Yes**, interchangeably after `/link` + verify. |
+| Must I keep using the UI I started with? | **No.** State lives in the DB row, not in Discord vs game. |
+| What must stay constant? | Same Discord account for `/link`; same **`_sp_cl_info_ladder_uid`** in your shortcut for in-game commands. |
+| What is not unique? | In-game **nickname** — never used for identity. |
 
 ### How `sp_sv_client_check` works
 
