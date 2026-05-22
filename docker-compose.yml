@@ -1,0 +1,16 @@
+services:
+  api:
+    build: .
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8080
+    env_file: .env
+    volumes:
+      - ./sof_ladder.db:/app/sof_ladder.db
+    ports:
+      - "8080:8080"
+
+  bot:
+    build: .
+    command: python -m bot.main
+    env_file: .env
+    depends_on:
+      - api

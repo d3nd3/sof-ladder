@@ -1,0 +1,16 @@
+[Unit]
+Description=SoF Ladder Discord Bot
+After=network.target sof-ladder-api.service
+Requires=sof-ladder-api.service
+
+[Service]
+Type=simple
+User=sof-ladder
+WorkingDirectory=/opt/sof-ladder
+EnvironmentFile=/opt/sof-ladder/.env
+Environment=PYTHONPATH=/opt/sof-ladder
+ExecStart=/opt/sof-ladder/venv/bin/python -m bot.main
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

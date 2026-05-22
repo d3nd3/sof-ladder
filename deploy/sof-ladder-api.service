@@ -1,0 +1,15 @@
+[Unit]
+Description=SoF Ladder API
+After=network.target
+
+[Service]
+Type=simple
+User=sof-ladder
+WorkingDirectory=/opt/sof-ladder
+EnvironmentFile=/opt/sof-ladder/.env
+Environment=PYTHONPATH=/opt/sof-ladder
+ExecStart=/opt/sof-ladder/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8080
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
