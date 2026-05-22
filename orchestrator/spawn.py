@@ -9,7 +9,15 @@ def _gametype() -> str:
     return os.getenv("SOF_DEATHMATCH", "4").strip() or "4"
 
 
-def build_launch_cmd(match_id: int, port: int, password: str, rcon_password: str, map_name: str) -> tuple[list[str], dict]:
+def build_launch_cmd(
+    match_id: int,
+    port: int,
+    password: str,
+    rcon_password: str,
+    map_name: str,
+    ladder_uid_a: str = "",
+    ladder_uid_b: str = "",
+) -> tuple[list[str], dict]:
     p = get_sof_paths()
     wine = os.getenv("WINE", "wine")
     xvfb = os.getenv("XVFB_RUN", "xvfb-run")
@@ -46,7 +54,10 @@ def build_launch_cmd(match_id: int, port: int, password: str, rcon_password: str
         rcon_password,
         "+set",
         "maxclients",
-        "2",
+        os.getenv("MATCH_MAX_CLIENTS", "8"),
+        "+set",
+        "maxspectators",
+        os.getenv("MATCH_MAX_SPECTATORS", "0"),
         "+set",
         "timelimit",
         "15",
@@ -55,6 +66,10 @@ def build_launch_cmd(match_id: int, port: int, password: str, rcon_password: str
         args += ["+set", "ctf_loops", os.getenv("CTF_LOOPS", "10"), "+set", "fraglimit", "0"]
     else:
         args += ["+set", "fraglimit", str(settings.fraglimit)]
+    if ladder_uid_a:
+        args += ["+set", "ladder_match_uid_a", ladder_uid_a]
+    if ladder_uid_b:
+        args += ["+set", "ladder_match_uid_b", ladder_uid_b]
     args += [
         "+map",
         map_name,
@@ -64,11 +79,21 @@ def build_launch_cmd(match_id: int, port: int, password: str, rcon_password: str
     return args, env
 
 
-def spawn_server(match_id: int, port: int, password: str, rcon_password: str, map_name: str) -> subprocess.Popen:
+def spawn_server(
+    match_id: int,
+    port: int,
+    password: str,
+    rcon_password: str,
+    map_name: str,
+    ladder_uid_a: str = "",
+    ladder_uid_b: str = "",
+) -> subprocess.Popen:
     p = get_sof_paths()
     log_dir = p.log_dir / str(match_id)
     log_dir.mkdir(parents=True, exist_ok=True)
-    args, env = build_launch_cmd(match_id, port, password, rcon_password, map_name)
+    args, env = build_launch_cmd(
+        match_id, port, password, rcon_password, map_name, ladder_uid_a, ladder_uid_b
+    )
     log = open(log_dir / "server.log", "w")
     return subprocess.Popen(
         args,

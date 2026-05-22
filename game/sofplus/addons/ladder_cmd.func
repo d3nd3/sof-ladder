@@ -44,6 +44,22 @@ function ladder_cmd_submit(~slot, ~action)
   sp_sc_cvar_sset ~uk _ladder_ck_uid_
   sp_sc_cvar_append ~uk #~slot
   sp_sc_cvar_copy _sp_cl_info_ladder_uid #~uk
+  sp_sc_flow_if itext cvar ~action == val join
+  {
+    sp_sc_flow_if text cvar ladder_matchid != val ""
+    {
+      sp_sc_flow_if text cvar #~uk == cvar ladder_match_uid_a
+      {
+        sp_sv_client_cvar_set #~slot 0 "Ladder: finish this match first"
+        sp_sc_func_exec ladder_match_skip
+      }
+      sp_sc_flow_if text cvar #~uk == cvar ladder_match_uid_b
+      {
+        sp_sv_client_cvar_set #~slot 0 "Ladder: finish this match first"
+        sp_sc_func_exec ladder_match_skip
+      }
+    }
+  }
   zero _sp_sv_info_client_ip
   sp_sv_info_client #~slot
   sp_sc_cvar_random_int ~cid 10000000 99999999

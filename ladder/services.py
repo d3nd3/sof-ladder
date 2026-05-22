@@ -65,6 +65,10 @@ def join_queue(discord_id: str) -> dict:
         if p["state"] == states.COOLDOWN and p["cooldown_until"]:
             if p["cooldown_until"] > _now():
                 raise ValueError(f"cooldown until {p['cooldown_until']}")
+        if p["state"] == states.IN_MATCH:
+            raise ValueError("finish your current match before queueing (spectators may queue)")
+        if p["state"] == states.MATCH_OFFER:
+            raise ValueError("accept or decline your match offer first (.ladder accept)")
         if p["state"] not in states.QUEUEABLE:
             raise ValueError(f"cannot queue in state {p['state']}")
         if penalties.check_spam_queue(conn, p["id"]):

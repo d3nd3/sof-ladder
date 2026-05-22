@@ -1,6 +1,6 @@
 # SoF Ladder — 1v1 Ranked Matchmaking
 
-SoF Ladder is a ranked 1v1 matchmaker for Soldier of Fortune: it binds each Discord account to a game client, places verified players in a shared queue, pairs them by Elo (window widens the longer you wait), and runs each match on a dedicated Wine server while updating ratings and penalties in a central database. Operationally it is **four programs**—**FastAPI** (`backend/main.py`) plus SQLite or Postgres for players, queue, matches, and Elo; a **Discord bot** (`bot/main.py`) for `/link`, the `#sof-ladder` embed (**Find 1v1** / **Leave queue** / **Stats**), slash commands, and optional DMs for offers and connect info; an **orchestrator** (`orchestrator/main.py`) that must live on the **same machine as the game** and spawns/monitors `wine sofmp.exe`, reads SoFplus files under `user/sofplus/data/ladder_out/`, and calls internal API routes; and the **Wine servers** themselves (hub, verify, and per-match instances). **Two player UIs are parallel, not separate ladders:** Discord drives the API with your `discord_id`; in-game **`.ladder join` / `leave` / `status` / `accept`** on the always-on **hub** (`LADDER_HUB_PORT`, default `28907`) writes `ladder_out/cmd/*.cfg`, which the orchestrator turns into the same queue/accept calls by resolving **`ladder_uid`**—so one player can queue from Discord while another uses `.ladder join`, and either UI can accept or show connect details. **Identity is established once via Discord `/link`:** the API generates a random **`ladder_uid`** (`uuid.uuid4()`) and a short-lived **verify nonce**; you copy them into client cvars **`_sp_cl_info_ladder_uid`** and **`_sp_cl_info_ladder_verify`** in your SoF shortcut/`autoexec.cfg`, connect to the **verify server** (`VERIFY_SERVER_PORT`, default `28908`), and SoFplus **`sp_sv_client_check`** (via `ladder_check.func`) confirms your client actually holds those values—display names are never trusted. After verify you keep only the uid `+set` locally (persist it across reboots; `/stats` can show it again); the DB keeps the canonical id until you re-run `/link` (which rotates it). When both verified players are queued, the API creates a **pending match**; **both must accept** (Discord DM/button, `/accept`, or `.ladder accept`) before the orchestrator allocates a port, spawns a **match server** with `+set ladder_matchid <id>`, and players connect to `SERVER_CONNECT_IP` with the same uid cvar—SoFplus **`ladder_match.func`** exports snapshots and `result.cfg` for frags/winner ( **`ladder_check.func`** writes `presence/<uid>.cfg` for dodge detection); rcon is only a fallback if exports are missing. **Anti-abuse** (cooldowns, strikes, accept timeout, dodge/forfeit) is enforced in the API/orchestrator. Default **v1** colocates API, bot, orchestrator, and Wine on one game VPS; the bot may run elsewhere, but the orchestrator cannot. The sections below diagram each layer—pathways, identity, exports, and deployment—in full detail.
+SoF Ladder is a ranked 1v1 matchmaker for Soldier of Fortune: it binds each Discord account to a game client, places verified players in a shared queue, pairs them by Elo (window widens the longer you wait), and runs each match on a **new** dedicated Wine server spawned by the orchestrator while updating ratings and penalties in a central database. Operationally it is **four programs**—**FastAPI** (`backend/main.py`) plus SQLite or Postgres; a **Discord bot** (`bot/main.py`) for `/link`, the `#sof-ladder` embed (**Find 1v1** / **Leave queue** / **Stats**), slash commands, and optional DMs; an **orchestrator** (`orchestrator/main.py`) on the **game VPS** that spawns/monitors child `wine sofmp.exe` processes (verify, then one process per active match on `PORT_START`…`PORT_END`), reads SoFplus exports under `ladder_out/`, and polls in-game command files; and those **Wine game servers**. **Two player UIs are parallel:** Discord calls the API with `discord_id`; in-game **`.ladder join` / `leave` / `status` / `accept`** works on **any ladder-enabled server** that loads `ladder_report.cfg` (verify server, **match servers**, or an optional idle **hub** if `LADDER_HUB_ENABLED=1`)—each command writes `ladder_out/cmd/*.cfg` and the orchestrator resolves **`ladder_uid`** to the same queue/accept logic as Discord. **While a ranked match runs on server A**, the two participants cannot queue (API state `in_match` plus on-server check against `ladder_match_uid_a` / `ladder_match_uid_b`); **spectators** on that server (extra client slots, default `MATCH_MAX_CLIENTS=8`) may `.ladder join` for the next game. When pairing completes, the orchestrator **spawns a separate match server** (server B)—players leave A and connect to B. **Identity once via Discord `/link`:** API issues **`ladder_uid`** (`uuid.uuid4()`) and verify nonce → client cvars **`_sp_cl_info_*`** → connect **verify** server (`VERIFY_SERVER_PORT`) → `sp_sv_client_check` proves ownership (not nicknames). After verify, keep uid in your shortcut; queue/accept from Discord or `.ladder`. Both must **accept** before the match process starts; SoFplus **`ladder_match.func`** / **`ladder_check.func`** report frags, presence, and `result.cfg` (rcon fallback only if exports fail). **Anti-abuse** via cooldowns, strikes, dodge/forfeit. Default **v1** colocates API, bot, orchestrator, and Wine; bot may be remote, orchestrator cannot. Details below.
 
 ## System architecture
 
@@ -21,11 +21,11 @@ flowchart TB
     Orch["orchestrator/main.py\nspawn + read SoFplus files"]
   end
 
-  subgraph game_host [Wine on game VPS]
-    HubSrv["Hub server\nLADDER_HUB_PORT"]
-    MatchSrv["Match servers\nPORT_START..END"]
+  subgraph game_host [Wine on game VPS - orchestrator spawns each]
+    MatchSrv["Match servers\nPORT_START..END\n.ladder for specs"]
     VerifySrv["Verify server\nVERIFY_SERVER_PORT"]
-    SoFplus["SoFplus addons\nmatch + check + cmd"]
+    HubSrv["Optional hub\nLADDER_HUB_ENABLED"]
+    SoFplus["ladder_report.cfg\nmatch + check + cmd"]
   end
 
   Players((Players))
@@ -38,17 +38,18 @@ flowchart TB
   Bot -->|"Bearer BOT_API_SECRET"| API
   API --> DB
   Orch -->|"X-Orchestrator-Secret"| API
-  Orch --> MatchSrv
-  Orch --> HubSrv
+  Orch -->|"spawns per match"| MatchSrv
   Orch --> VerifySrv
-  HubSrv --> SoFplus
+  Orch -.-> HubSrv
   MatchSrv --> SoFplus
   VerifySrv --> SoFplus
+  HubSrv -.-> SoFplus
   SoFplus -->|"ladder_out/*.cfg"| Orch
-  Orch -.->|"rcon fallback\n(match results only)"| MatchSrv
-  Players -->|"UDP .ladder"| HubSrv
+  Orch -.->|"rcon fallback"| MatchSrv
+  Players -->|"UDP .ladder"| MatchSrv
+  Players -->|"UDP .ladder"| VerifySrv
   Players -->|"UDP verify"| VerifySrv
-  Players -->|"UDP match"| MatchSrv
+  Players -->|"UDP play or spec"| MatchSrv
 ```
 
 ## Discord vs in-game pathways
@@ -59,7 +60,7 @@ Same backend as the overview above; this section maps each step to Discord vs in
 flowchart TB
   subgraph paths [Player UIs]
     D["Discord\nembed + /commands + DMs"]
-    G["In-game\n.ladder on hub :28907"]
+    G["In-game\n.ladder on ladder servers"]
   end
   subgraph core [Shared backend]
     API[FastAPI + DB]
@@ -74,7 +75,7 @@ flowchart TB
 | Step | Discord | In-game | Notes |
 |------|---------|---------|--------|
 | **Account setup** | `/link` → DM with cvars → connect **verify** server | — | **Discord only** for first-time bind (issues `ladder_uid`) |
-| **Queue** | **Find 1v1** button or `/cancel` to leave | `.ladder join` / `.ladder leave` on **hub** | Same queue; either path calls `join_queue` / `leave_queue` |
+| **Queue** | **Find 1v1** button or `/cancel` to leave | `.ladder join` / `.ladder leave` on **any ladder server** | Same queue; **not** while `in_match` (players in the active 1v1); **spectators OK** |
 | **Status** | `/stats` or embed **Stats** | `.ladder status` | Same player row; in-game shows connect `IP:port` when ready |
 | **Accept offer** | DM **Accept** or `/accept <id>` | `.ladder accept` | Same match; both must accept before server spawns |
 | **Connect to match** | DM with password | `.ladder status` after accept | Same `SERVER_CONNECT_IP` + assigned port |
@@ -84,9 +85,17 @@ flowchart TB
 
 **How Discord reaches the API:** `bot/main.py` → HTTP with `discord_id` from your slash command or button click.
 
-**Parallel use:** Player A can **Find 1v1** in `#sof-ladder` while Player B types `.ladder join` on the hub — pairing is unchanged. Match-offer **DMs** are Discord-only notifications; you can ignore them and use `.ladder accept` + `.ladder status` instead.
+**Parallel use:** Player A can **Find 1v1** in Discord while Player B types `.ladder join` from a spectator slot on a live match server — same queue.
 
-**Hub vs other servers:** Queue commands are meant for the always-on **hub** (`LADDER_HUB_PORT`, default `28907`). Verify server is for `/link` only. Match servers are for playing the ranked game, not queueing.
+**In-game anywhere (no hub required):** Every server that `exec`s [`ladder_report.cfg`](game/sofplus/addons/ladder_report.cfg) exposes `.ladder` — including **match servers** the orchestrator just spawned. The orchestrator starts a **child** `sofmp.exe` per accepted match (`+set ladder_matchid`, `ladder_match_uid_a/b` for the two fighters). Optional **`LADDER_HUB_ENABLED=1`** keeps an idle lobby on `LADDER_HUB_PORT` (default `28907`) if you want a permanent queue address without joining another match.
+
+**Who can queue from a live match server**
+
+| Client on match server | `.ladder join` |
+|----------------------|----------------|
+| The two ranked players (`in_match` in DB) | Blocked — finish the map first |
+| Spectators / idle slots (`idle` or already `queued`) | Allowed — queue for the **next** match |
+| Unverified | Blocked — `/link` first |
 
 ### Player link flow (`/link`)
 
@@ -118,7 +127,7 @@ sequenceDiagram
 
 ### Match flow (1v1)
 
-From queue to Elo update (both players must be **verified**). Queue/accept can use **either** Discord or in-game (see [Discord vs in-game pathways](#discord-vs-in-game-pathways)); diagram shows the Discord UI — swap “Find 1v1” / “Accept” for `.ladder join` / `.ladder accept` on the hub if you prefer.
+From queue to Elo update (both players must be **verified**). Queue/accept via Discord or `.ladder` on any ladder server ([pathways](#discord-vs-in-game-pathways)). When both accept, the orchestrator **spawns a new match server** (separate Wine process); that is distinct from whatever server you queued from.
 
 ```mermaid
 sequenceDiagram
@@ -361,7 +370,7 @@ Implementation: `bot/main.py` → `refresh_ladder_embed()`.
 **Embed content** (updated on each refresh):
 
 - Title: **SoF 1v1 Ladder**
-- Description: reminder to `/link` first; in-game queue via hub `.ladder join`
+- Description: reminder to `/link` first; in-game `.ladder join` on any ladder server
 - **In queue** — live count from `GET /queue/count` on the API
 - **Map** — `dm/jpntclx` (v1 default)
 - **Frag limit** — from `FRAGLIMIT` in `.env`
@@ -564,7 +573,7 @@ After a reboot or reinstall, connect with the **same** `+set _sp_cl_info_ladder_
 
 ### In-game commands (detail)
 
-SoFplus [`.COMMAND`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html) — functions named `.something` callable from client console/chat. Hub loads [`ladder_cmd.func`](game/sofplus/addons/ladder_cmd.func).
+SoFplus [`.COMMAND`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html) — functions named `.something` callable from client console/chat. [`ladder_cmd.func`](game/sofplus/addons/ladder_cmd.func) loads on verify, match, and optional hub servers via `ladder_report.cfg`.
 
 | Command | Discord equivalent |
 |---------|-------------------|
@@ -614,7 +623,7 @@ Run these on the **game VPS** (orchestrator + SoF must live here). API/bot can b
    Uses `SOF_INSTALL_DIR` and `SOF_USER_SUBFOLDER` from `.env`. Copies `ladder_match.cfg` to the user folder and `game/sofplus/addons/*` to `$USER_DIR/sofplus/addons/` (same layout as [sof-discord-bot `info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func)).
 
    Server launch (orchestrator): `+set user <SOF_USER_SUBFOLDER>` `+set dedicated 1` `+set deathmatch 4` then map/cfg exec.
-5. Open UDP ports `LADDER_HUB_PORT` (default `28907`), `VERIFY_SERVER_PORT` (default `28908`), and `PORT_START`–`PORT_END` (match servers)
+5. Open UDP `VERIFY_SERVER_PORT` (default `28908`), `PORT_START`–`PORT_END` (match servers), and optionally `LADDER_HUB_PORT` if `LADDER_HUB_ENABLED=1`
 6. Set `SERVER_CONNECT_IP` to your public IP
 
 ## Match data: SoFplus first, rcon fallback

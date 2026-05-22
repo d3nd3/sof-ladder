@@ -13,7 +13,6 @@ from orchestrator.spawn import spawn_server
 from ladder import identity
 from orchestrator.sofplus_io import match_dir, read_result
 from orchestrator.verify import VERIFY_PORT, poll_verify_exports, spawn_verify_server
-from orchestrator.hub import HUB_PORT, spawn_hub_server
 from orchestrator.game_cmd import poll_game_commands
 
 API = settings.api_base.rstrip("/")
@@ -80,15 +79,21 @@ async def run_loop():
     runtimes: dict[int, MatchRuntime] = {}
     verify_proc = None
     verify_rcon = ""
-    hub_proc = spawn_hub_server()
-    print(f"hub server on {HUB_PORT} (.ladder commands)")
+    hub_proc = None
+    if settings.ladder_hub_enabled:
+        from orchestrator.hub import HUB_PORT, spawn_hub_server
+
+        hub_proc = spawn_hub_server()
+        print(f"optional hub on {HUB_PORT}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
             poll_game_commands(out_root)
-            if hub_proc.poll() is not None:
+            if hub_proc is not None and hub_proc.poll() is not None:
+                from orchestrator.hub import spawn_hub_server
+
                 hub_proc = spawn_hub_server()
-                print(f"hub server restarted on {HUB_PORT}")
+                print("hub server restarted")
             pending = identity.list_pending_verifications()
             if pending:
                 if verify_proc is None or verify_proc.poll() is not None:
@@ -120,7 +125,13 @@ async def run_loop():
                 pa, pb = full["players"][0], full["players"][1]
                 _cleanup_match_files(mid, out_root)
                 proc = spawn_server(
-                    mid, port, m["password"], m["rcon_password"], m.get("map_name", "dm/jpntclx")
+                    mid,
+                    port,
+                    m["password"],
+                    m["rcon_password"],
+                    m.get("map_name", "dm/jpntclx"),
+                    pa.get("ladder_uid") or "",
+                    pb.get("ladder_uid") or "",
                 )
                 await api_post(client, f"/internal/matches/{mid}/port", {"port": port})
                 runtimes[mid] = MatchRuntime(

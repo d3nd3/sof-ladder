@@ -240,7 +240,9 @@ async def cmd_link(interaction: discord.Interaction):
                 f"1. Start SoF with those cvars\n"
                 f"2. Connect to **`{ip}:{vport}`** (verify server, ~{p['verify_ttl_minutes']} min window)\n"
                 f"3. When verified, `/stats` shows linked — then queue\n"
-                f"4. In-game: connect **`{ip}:{hub}`** (hub) and type **`.ladder join`** (no Discord needed)"
+                f"4. In-game: **`.ladder join`** on any ladder server (match, verify"
+                + (f", or hub `{ip}:{hub}`" if os.getenv("LADDER_HUB_ENABLED", "").lower() in ("1", "true", "yes") else "")
+                + ")"
             ),
             inline=False,
         )

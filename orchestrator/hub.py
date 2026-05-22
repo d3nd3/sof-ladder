@@ -9,7 +9,7 @@ HUB_PORT = int(os.getenv("LADDER_HUB_PORT", "28907"))
 
 
 def spawn_hub_server() -> subprocess.Popen:
-    """Always-on server for .ladder commands (empty ladder_matchid)."""
+    """Optional idle lobby (.ladder works on match/verify servers without this)."""
     p = get_sof_paths()
     wine = os.getenv("WINE", "wine")
     xvfb = os.getenv("XVFB_RUN", "xvfb-run")
