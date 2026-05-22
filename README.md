@@ -6,19 +6,19 @@ Ranked **1v1** matchmaking for **Soldier of Fortune**: one ladder account per pl
 
 | Step | What happens |
 |------|----------------|
-| **1. Link** | Discord `/link` issues a `ladder_uid`; you prove your client on the **verify** server (`VERIFY_SERVER_PORT`). |
+| **1. Link** | One-time signup via Discord `/link` + verify server — see [Player registration & identity](#player-registration--identity). |
 | **2. Queue** | Verified players enter one shared queue (Elo window widens the longer you wait). |
 | **3. Accept** | When paired, **both** must accept (Discord DM / `/accept` or `.ladder accept`). |
 | **4. Play** | Orchestrator spawns a **new** `sofmp.exe` on `PORT_START`…`PORT_END`; you connect to that host — not the server you queued from. |
 | **5. Result** | SoFplus writes match files under `ladder_out/`; the API updates Elo and applies cooldowns / strikes. |
 
-You can use **Discord**, **in-game**, or **mix them** (e.g. queue with **Find 1v1**, accept with `.ladder accept`). Account creation is **Discord-only**; after verify, only your `ladder_uid` cvar matters in-game.
+You can use **Discord**, **in-game**, or **mix them** after you are verified. **Registration is Discord-only**; every later session is recognized by `_sp_cl_info_ladder_uid` on your game client ([persistence rules](#keeping-your-identity-across-sessions)).
 
 ## Two ways to play
 
 | | Discord | In-game |
 |---|---------|---------|
-| **Setup** | `/link` → verify server | — (needs `/link` first) |
+| **Setup** | [`/link` + verify](#how-to-register-first-time-players) (once) | — (must [register on Discord](#player-registration--identity) first) |
 | **Queue** | Embed **Find 1v1** / **Leave queue**, `/cancel` | `.ladder join` / `.ladder leave` |
 | **Accept** | DM button or `/accept <id>` | `.ladder accept` |
 | **Connect** | DM with `IP:port` + password | `.ladder status` |
@@ -38,10 +38,106 @@ In-game commands run on **any server** with [`ladder_report.cfg`](game/sofplus/a
 
 **v1 (recommended):** run all four on **one game VPS**. The bot may run elsewhere; the orchestrator **must** stay on the machine that runs Wine/SoF. See [Deployment topology](#deployment-topology).
 
-## Identity & match data (short)
+## Player registration & identity
 
-- **Account id:** server-generated `ladder_uid` → client cvar `_sp_cl_info_ladder_uid` (not your nickname).
-- **Proof:** SoFplus `sp_sv_client_check` on the verify server ([details](#player-identity)).
+There is **no web signup form**. You **register once** by linking a **Discord account** to a **game client**, then reuse the same client id on every PC session. In-game nicknames and Discord display names are **never** used as account ids.
+
+### How to register (first-time players)
+
+Registration = **`/link` on Discord** + **one visit to the verify server** with two client cvars set.
+
+| Step | What you must do |
+|------|------------------|
+| **1** | In Discord, run **`/link`** (bot replies with an ephemeral embed). |
+| **2** | Copy the two **`+set`** lines from **Launch cvars** into your SoF shortcut or `autoexec.cfg` (before you start the game). |
+| **3** | Launch SoF **with those cvars active** (they must be in the process that connects). |
+| **4** | Connect to **`SERVER_CONNECT_IP:VERIFY_SERVER_PORT`** (default port **28908**) within **15 minutes** of `/link`. |
+| **5** | Stay on the verify server briefly; SoFplus reads your cvars via `sp_sv_client_check`. |
+| **6** | Run **`/stats`** in Discord — you should see a linked in-game name and your `ladder_uid`. You can then queue. |
+
+**Server-assigned secrets (do not invent your own values):**
+
+| Name | Client cvar | Lifetime |
+|------|-------------|----------|
+| Account id (`ladder_uid`, UUID v4) | `_sp_cl_info_ladder_uid` | **Permanent** — keep in shortcut forever |
+| One-time verify token (32 hex chars) | `_sp_cl_info_ladder_verify` | **Link only** — remove from shortcut after verify |
+
+Example lines from `/link` (use your values, not these):
+
+```text
++set _sp_cl_info_ladder_uid "0875472d-7c4e-4fee-acf2-519308e1d441" +set _sp_cl_info_ladder_verify "a4319f98dab49dce35dfc87bb644d835"
+```
+
+**Cannot register in-game.** `.ladder join` before verify returns *not linked*. You need an existing row created by `/link`.
+
+**Cannot register without Discord.** The ladder row is keyed by your Discord user id; the bot is the only signup UI.
+
+### Verified vs unverified
+
+| Status | Database | Can queue / play ranked? |
+|--------|----------|-------------------------|
+| **Unverified** | `ladder_uid` set, `verify_nonce` still set | **No** |
+| **Verified** | `ladder_uid` set, `verify_nonce` cleared (`NULL`) | **Yes** |
+
+Queue checks ([`is_verified`](ladder/identity.py)): uid present **and** verify nonce cleared.
+
+### Keeping your identity across sessions
+
+Your account is **`discord_id` + `ladder_uid`**. Elo, strikes, and queue state live in the **ladder database** on the VPS. The **game only knows you** if your shortcut still sets the same `_sp_cl_info_ladder_uid`.
+
+**What you must keep unchanged**
+
+| Item | Why |
+|------|-----|
+| Same **Discord account** for `/link`, `/stats`, embed buttons | Bot identifies you by Discord user id. |
+| Same **`_sp_cl_info_ladder_uid` value** in every launch | In-game `.ladder` and match presence use this uuid, not your nickname. |
+
+**After verify, your shortcut should contain only the uid line:**
+
+```text
++set _sp_cl_info_ladder_uid "<your-uuid>"
+```
+
+Remove `_sp_cl_info_ladder_verify` after a successful verify — it is only for the initial proof.
+
+**Where identity is stored**
+
+| Location | What | Survives game PC reboot? |
+|----------|------|-------------------------|
+| **Ladder DB** | `players.ladder_uid` tied to your Discord | **Yes** — until you run `/link` again |
+| **Your PC** | `+set _sp_cl_info_ladder_uid "…"` in shortcut / `autoexec.cfg` | **Only if you saved it** — SoF does not remember it for you |
+
+Save the uid the same way you persist any other launch option: shortcut target, `autoexec.cfg`, or a wrapper script you always use to start SoF.
+
+**Recovering a lost shortcut (already verified)**
+
+1. **`/stats`** or the channel **Stats** button → copy the `ladder_uid` shown.
+2. Put it back in your shortcut as `+set _sp_cl_info_ladder_uid "…"`.
+3. **Do not** run `/link` only to “get the uuid back” — `/link` **rotates** your uid and invalidates the old shortcut until you verify again.
+
+**When `/link` is appropriate**
+
+| Situation | What to do |
+|-----------|------------|
+| First signup or verify never completed | `/link` → verify server within 15 min |
+| Lost uid on PC, still verified on ladder | `/stats` → copy uid (no `/link`) |
+| New gaming PC / reinstall | Copy the **same** uid into the new shortcut (from `/stats` if needed) |
+| Intentional re-bind | `/link` only while **idle** (not queued, not in `match_offer`, not `in_match`) |
+| Verify window expired | `/link` again for a fresh nonce |
+
+**What breaks identity**
+
+| Action | Effect |
+|--------|--------|
+| Run `/link` while queued or in a match | **Rejected** — leave queue or finish the match first |
+| Run `/link` again while idle | **New** `ladder_uid` — old shortcut stops working until you re-verify |
+| Change `_sp_cl_info_ladder_uid` to another value | Treated as a different or unlinked client |
+| Use a second Discord account | **Second ladder account** (separate Elo row) |
+
+Technical reference (cvar checks, export files, diagrams): [Player identity (reference)](#player-identity-reference).
+
+### Match data (orchestrator)
+
 - **Results:** `ladder_match.func` + `ladder_check.func` → `ladder_out/<match_id>/` (presence, snapshots, `result.cfg`).
 - **Abuse:** queue spam cooldowns, accept timeout, dodge penalties, three-strike suspension.
 
@@ -140,7 +236,7 @@ flowchart LR
 
 | Step | Discord | In-game | Notes |
 |------|---------|---------|--------|
-| **Account setup** | `/link` → DM with cvars → connect **verify** server | — | **Discord only** for first-time bind (issues `ladder_uid`) |
+| **Account setup** | [`/link` → verify server](#how-to-register-first-time-players) | — | **Discord only** — see [registration](#player-registration--identity) |
 | **Queue** | **Find 1v1** button or `/cancel` to leave | `.ladder join` / `.ladder leave` on **any ladder server** | Same queue; **not** while `in_match` (players in the active 1v1); **spectators OK** |
 | **Status** | `/stats` or embed **Stats** | `.ladder status` | Same player row; in-game shows connect `IP:port` when ready |
 | **Accept offer** | DM **Accept** or `/accept <id>` | `.ladder accept` | Same match; both must accept before server spawns |
@@ -165,6 +261,8 @@ Each accepted match gets its own child `sofmp.exe` (`+set ladder_matchid`, `ladd
 | Unverified | Blocked — `/link` first |
 
 ### Player link flow (`/link`)
+
+Signup checklist: [How to register](#how-to-register-first-time-players). Persistence: [Keeping your identity across sessions](#keeping-your-identity-across-sessions).
 
 Verification is **required before queueing**. Identity uses SoFplus [`sp_sv_client_check`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html) — not rcon `dumpuser` or userinfo.
 
@@ -492,7 +590,7 @@ Implementation: `bot/main.py` → `refresh_ladder_embed()`.
 **Embed content** (updated on each refresh):
 
 - Title: **SoF 1v1 Ladder**
-- Description: reminder to `/link` first; in-game `.ladder join` on any ladder server
+- Description: reminder to [register via `/link`](#player-registration--identity) first; in-game `.ladder join` on any ladder server
 - **In queue** — live count from `GET /queue/count` on the API
 - **Map** — `dm/jpntclx` (v1 default)
 - **Frag limit** — from `FRAGLIMIT` in `.env`
@@ -524,9 +622,11 @@ The embed’s **In queue** count is refreshed when someone uses **Find 1v1**, **
 
 Match offers and connect info are **not** on this embed — they are sent by **DM** unless you use in-game `.ladder accept` and `.ladder status` instead ([pathways](#discord-vs-in-game-pathways)).
 
-## Player identity
+## Player identity (reference)
 
-Discord display names and in-game nicknames are **not** trusted for account binding or match pairing. On `/link`, the API generates a server-side **`ladder_uid`** (`uuid.uuid4()`, stored in the DB) and tells you to copy it into client cvar **`_sp_cl_info_ladder_uid`**; SoFplus **`sp_sv_client_check`** then proves your game client holds that value ([SoFplus manual](https://sof1.megalag.org/sofplus/download/sofplus-manual.html), [`info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func) pattern). The in-game pathway identifies you with the same cvar — not your nickname.
+Player-facing rules: [Player registration & identity](#player-registration--identity).
+
+Discord display names and in-game nicknames are **not** trusted. The API assigns **`ladder_uid`** (`uuid.uuid4()`) on `/link`; you copy it to **`_sp_cl_info_ladder_uid`**. SoFplus **`sp_sv_client_check`** proves your client holds that value ([SoFplus manual](https://sof1.megalag.org/sofplus/download/sofplus-manual.html), [`info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func) pattern).
 
 ### Unique players, mixed Discord + in-game
 
@@ -722,30 +822,6 @@ Queue join ([`ladder/identity.is_verified`](ladder/identity.py)): `ladder_uid` p
 | `presence/<ladder_uid>.cfg` | Any server; uid read (verify cvar empty) | [`monitor._uids_from_check_exports`](orchestrator/monitor.py) |
 | `<match_id>/tmp_player_*.cfg` | Match server snapshots | Frags, names, dodge timing |
 | `<match_id>/result.cfg` | Map end | Winner / Elo |
-
-### Persistence (same uid after reboot)
-
-Identity is split between **two places**:
-
-| Where | What is stored | Survives PC reboot? |
-|-------|----------------|---------------------|
-| **Ladder DB** (`players.ladder_uid`) | Your account UUID, tied to Discord | **Yes** — permanent until you run `/link` again |
-| **Your PC** (SoF shortcut / `autoexec.cfg`) | `+set _sp_cl_info_ladder_uid "<uuid>"` | **Only if you save it there** — the game does not remember it for you |
-
-The ladder **does not** push cvars to your machine after verify. You must **persist the launch line yourself**, the same way you would any other `+set` options:
-
-- SoF **desktop shortcut** target / “Properties → Target” extra arguments  
-- `autoexec.cfg` (or a cfg you `exec` from it) under your SoF user folder  
-- A small launcher script you always use to start the game  
-
-After a reboot or reinstall, connect with the **same** `+set _sp_cl_info_ladder_uid "…"` line — the value must still match `players.ladder_uid` in the database.
-
-**Recovering a lost client config (without re-linking):**
-
-- Use the channel **Stats** button or `/stats` — both show your `ladder_uid` if you are already verified. Copy it back into your shortcut.
-- **Do not run `/link` again** just to “get the uuid back” — that **rotates** `ladder_uid` in the DB and invalidates your old shortcut until you verify the new pair.
-
-**Re-running `/link`** is only for intentionally re-binding or if you never finished verify; it issues a **new** UUID and nonce.
 
 ### Security properties
 
