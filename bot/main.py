@@ -2,6 +2,7 @@ import os
 import asyncio
 
 VERIFY_SERVER_PORT = int(os.getenv("VERIFY_SERVER_PORT", "28908"))
+LADDER_HUB_PORT = int(os.getenv("LADDER_HUB_PORT", "28907"))
 
 import discord
 from discord import app_commands
@@ -219,6 +220,7 @@ async def cmd_link(interaction: discord.Interaction):
         p = await api.link_start(str(interaction.user.id))
         ip = settings.server_connect_ip
         vport = VERIFY_SERVER_PORT
+        hub = LADDER_HUB_PORT
         embed = discord.Embed(
             title="Link your SoF client",
             description=(
@@ -237,7 +239,8 @@ async def cmd_link(interaction: discord.Interaction):
             value=(
                 f"1. Start SoF with those cvars\n"
                 f"2. Connect to **`{ip}:{vport}`** (verify server, ~{p['verify_ttl_minutes']} min window)\n"
-                f"3. When verified, `/stats` shows linked — then queue"
+                f"3. When verified, `/stats` shows linked — then queue\n"
+                f"4. In-game: connect **`{ip}:{hub}`** (hub) and type **`.ladder join`** (no Discord needed)"
             ),
             inline=False,
         )
@@ -251,11 +254,15 @@ async def cmd_link(interaction: discord.Interaction):
 async def cmd_stats(interaction: discord.Interaction):
     try:
         p = await api.get_player(str(interaction.user.id))
-        await interaction.response.send_message(
+        msg = (
             f"**{p.get('sof_name') or 'not linked'}** — Elo **{p['elo']}**{_provisional(p['games_played'])}, "
-            f"{p['games_played']} games, state `{p['state']}`",
-            ephemeral=True,
+            f"{p['games_played']} games, state `{p['state']}`"
         )
+        if p.get("ladder_uid") and not p.get("verify_nonce"):
+            msg += f"\nShortcut: `+set _sp_cl_info_ladder_uid \"{p['ladder_uid']}\"`"
+        elif p.get("ladder_uid"):
+            msg += f"\nuid `{p['ladder_uid']}` (finish /link verify first)"
+        await interaction.response.send_message(msg, ephemeral=True)
     except RuntimeError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 

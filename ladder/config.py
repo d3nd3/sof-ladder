@@ -26,6 +26,7 @@ class Settings:
     server_connect_ip: str = os.getenv("SERVER_CONNECT_IP", "127.0.0.1")
     port_start: int = int(os.getenv("PORT_START", "28910"))
     port_end: int = int(os.getenv("PORT_END", "28959"))
+    ladder_hub_port: int = int(os.getenv("LADDER_HUB_PORT", "28907"))
 
 
 settings = Settings()

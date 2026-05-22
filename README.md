@@ -22,9 +22,10 @@ flowchart TB
   end
 
   subgraph game_host [Wine on game VPS]
+    HubSrv["Hub server\nLADDER_HUB_PORT"]
     MatchSrv["Match servers\nPORT_START..END"]
     VerifySrv["Verify server\nVERIFY_SERVER_PORT"]
-    SoFplus["SoFplus addons\nladder_match + ladder_check"]
+    SoFplus["SoFplus addons\nmatch + check + cmd"]
   end
 
   Players((Players))
@@ -37,12 +38,15 @@ flowchart TB
   Bot -->|"Bearer BOT_API_SECRET"| API
   API --> DB
   Orch -->|"X-Orchestrator-Secret"| API
-  Orch -->|"spawn match servers"| MatchSrv
-  Orch -->|"spawn while pending /link"| VerifySrv
+  Orch --> MatchSrv
+  Orch --> HubSrv
+  Orch --> VerifySrv
+  HubSrv --> SoFplus
   MatchSrv --> SoFplus
   VerifySrv --> SoFplus
   SoFplus -->|"ladder_out/*.cfg"| Orch
   Orch -.->|"rcon fallback\n(match results only)"| MatchSrv
+  Players -->|"UDP .ladder"| HubSrv
   Players -->|"UDP verify"| VerifySrv
   Players -->|"UDP match"| MatchSrv
 ```
@@ -494,6 +498,30 @@ Queue join ([`ladder/identity.is_verified`](ladder/identity.py)): `ladder_uid` p
 | `<match_id>/tmp_player_*.cfg` | Match server snapshots | Frags, names, dodge timing |
 | `<match_id>/result.cfg` | Map end | Winner / Elo |
 
+### Persistence (same uid after reboot)
+
+Identity is split between **two places**:
+
+| Where | What is stored | Survives PC reboot? |
+|-------|----------------|---------------------|
+| **Ladder DB** (`players.ladder_uid`) | Your account UUID, tied to Discord | **Yes** — permanent until you run `/link` again |
+| **Your PC** (SoF shortcut / `autoexec.cfg`) | `+set _sp_cl_info_ladder_uid "<uuid>"` | **Only if you save it there** — the game does not remember it for you |
+
+The ladder **does not** push cvars to your machine after verify. You must **persist the launch line yourself**, the same way you would any other `+set` options:
+
+- SoF **desktop shortcut** target / “Properties → Target” extra arguments  
+- `autoexec.cfg` (or a cfg you `exec` from it) under your SoF user folder  
+- A small launcher script you always use to start the game  
+
+After a reboot or reinstall, connect with the **same** `+set _sp_cl_info_ladder_uid "…"` line — the value must still match `players.ladder_uid` in the database.
+
+**Recovering a lost client config (without re-linking):**
+
+- Use the channel **Stats** button or `/stats` — both show your `ladder_uid` if you are already verified. Copy it back into your shortcut.
+- **Do not run `/link` again** just to “get the uuid back” — that **rotates** `ladder_uid` in the DB and invalidates your old shortcut until you verify the new pair.
+
+**Re-running `/link`** is only for intentionally re-binding or if you never finished verify; it issues a **new** UUID and nonce.
+
 ### Security properties
 
 - **Active read** — server requests cvar values from the client; not spoofable by choosing someone else's nickname alone.
@@ -502,12 +530,51 @@ Queue join ([`ladder/identity.is_verified`](ladder/identity.py)): `ladder_uid` p
 - **SoFplus-native** — no dependency on rcon `dumpuser` parsing for identity.
 - **Match pairing** — orchestrator matches connected `ladder_uid` values to the two players provisioned for the match (presence + snapshots), not display names alone.
 
-### Commands
+### In-game commands (SoFplus `.COMMAND`)
 
-- `/link` — issue uid + verify nonce; DM launch cvars + verify server address
+Verified players can queue and accept matches **from inside SoF** without opening Discord. The orchestrator runs an always-on **hub server** (`LADDER_HUB_PORT`, default `28907`) that loads [`ladder_cmd.func`](game/sofplus/addons/ladder_cmd.func).
+
+SoFplus lets server admins define client commands as functions whose names start with **`.`** ([manual: `.COMMAND`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html)). Players type in console or chat:
+
+| Command | Action |
+|---------|--------|
+| `.ladder` | Help |
+| `.ladder join` | `POST` equivalent of **Find 1v1** (queue by `ladder_uid`) |
+| `.ladder leave` | Leave queue |
+| `.ladder status` | Elo, state, pending match, connect `IP:port` when ready |
+| `.ladder accept` | Accept pending match offer (both players must accept) |
+
+**Requirements:** `_sp_cl_info_ladder_uid` in your shortcut (same as ranked matches). Discord `/link` + verify is still required once to create the account.
+
+**How it works**
+
+```mermaid
+sequenceDiagram
+  participant P as Player client
+  participant Hub as Hub sofmp
+  participant Cmd as ladder_cmd.func
+  participant Orch as Orchestrator
+  participant API as FastAPI
+
+  P->>Hub: .ladder join
+  Hub->>Cmd: function .ladder(slot, join)
+  Cmd->>Cmd: sp_sc_cvar_save ladder_out/cmd/ID.cfg
+  Orch->>Orch: poll_game_commands
+  Orch->>API: join_queue(discord_id via ladder_uid)
+  Orch->>Cmd: write cmd_resp/ID.cfg
+  Cmd->>P: sp_sv_client_cvar_set "Queued..."
+```
+
+The same `.ladder` handlers also load on **verify** and **match** servers (via `ladder_report.cfg`), but the dedicated hub is the intended place to queue while idle.
+
+Match offers may still arrive by **Discord DM**; use `.ladder accept` in-game or `/accept` on Discord.
+
+### Commands (Discord)
+
+- `/link` — issue uid + verify nonce; DM launch cvars + verify + hub address
 - `/stats`, `/leaderboard`, `/cancel`, `/accept <match_id>`
 
-Slash commands are separate from the channel embed; the embed is only for queueing and at-a-glance queue size.
+Slash commands and the channel embed are optional once you use the hub; the embed is still useful for queue count at a glance.
 
 ## VPS / Wine server setup
 
@@ -536,7 +603,7 @@ Run these on the **game VPS** (orchestrator + SoF must live here). API/bot can b
    Uses `SOF_INSTALL_DIR` and `SOF_USER_SUBFOLDER` from `.env`. Copies `ladder_match.cfg` to the user folder and `game/sofplus/addons/*` to `$USER_DIR/sofplus/addons/` (same layout as [sof-discord-bot `info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func)).
 
    Server launch (orchestrator): `+set user <SOF_USER_SUBFOLDER>` `+set dedicated 1` `+set deathmatch 4` then map/cfg exec.
-5. Open UDP ports `VERIFY_SERVER_PORT` (default `28908`) and `PORT_START`–`PORT_END` (match servers)
+5. Open UDP ports `LADDER_HUB_PORT` (default `28907`), `VERIFY_SERVER_PORT` (default `28908`), and `PORT_START`–`PORT_END` (match servers)
 6. Set `SERVER_CONNECT_IP` to your public IP
 
 ## Match data: SoFplus first, rcon fallback

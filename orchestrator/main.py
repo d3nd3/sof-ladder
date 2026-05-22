@@ -13,6 +13,8 @@ from orchestrator.spawn import spawn_server
 from ladder import identity
 from orchestrator.sofplus_io import match_dir, read_result
 from orchestrator.verify import VERIFY_PORT, poll_verify_exports, spawn_verify_server
+from orchestrator.hub import HUB_PORT, spawn_hub_server
+from orchestrator.game_cmd import poll_game_commands
 
 API = settings.api_base.rstrip("/")
 ORCH_HEADERS = {"X-Orchestrator-Secret": settings.orchestrator_secret}
@@ -78,9 +80,15 @@ async def run_loop():
     runtimes: dict[int, MatchRuntime] = {}
     verify_proc = None
     verify_rcon = ""
+    hub_proc = spawn_hub_server()
+    print(f"hub server on {HUB_PORT} (.ladder commands)")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
+            poll_game_commands(out_root)
+            if hub_proc.poll() is not None:
+                hub_proc = spawn_hub_server()
+                print(f"hub server restarted on {HUB_PORT}")
             pending = identity.list_pending_verifications()
             if pending:
                 if verify_proc is None or verify_proc.poll() is not None:

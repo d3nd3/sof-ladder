@@ -155,6 +155,35 @@ def create_match_offer(conn, pid_a: int, pid_b: int) -> int:
     return mid
 
 
+def accept_match_by_uid(ladder_uid: str, match_id: int | None = None) -> dict:
+    p = get_player_by_ladder_uid(ladder_uid.strip())
+    if not p:
+        raise ValueError("not linked")
+    mid = match_id or p.get("active_match_id")
+    if not mid:
+        raise ValueError("no pending match offer")
+    return accept_match(p["discord_id"], int(mid))
+
+
+def game_status_message(p: dict) -> str:
+    parts = [f"Elo {p['elo']}", f"state {p['state']}"]
+    if p["state"] == states.QUEUED:
+        parts.append(f"queue {queue_count()}")
+    if p.get("active_match_id"):
+        m = get_match(p["active_match_id"])
+        if m:
+            parts.append(f"match #{m['id']} {m['status']}")
+            if m["status"] in (states.MATCH_PROVISIONING, states.MATCH_LIVE) and m.get("port"):
+                parts.append(f"connect {settings.server_connect_ip}:{m['port']}")
+                if m.get("password"):
+                    parts.append(f"pw {m['password']}")
+            elif m["status"] == states.MATCH_PENDING:
+                parts.append("type .ladder accept")
+    if p.get("cooldown_until") and p["state"] == states.COOLDOWN:
+        parts.append(f"cooldown {p['cooldown_until']} UTC")
+    return " | ".join(parts)
+
+
 def accept_match(discord_id: str, match_id: int) -> dict:
     with get_db() as conn:
         p = conn.execute("SELECT * FROM players WHERE discord_id=?", (discord_id,)).fetchone()

@@ -14,7 +14,7 @@ SOF_CWD="${SOF_CWD:-$SOF_INSTALL_DIR}"
 USER_DIR="${SOF_USER_DIR:-$SOF_CWD/$SOF_USER_SUBFOLDER}"
 ADDONS="$USER_DIR/sofplus/addons"
 
-cp "$ROOT/game/ladder_match.cfg" "$USER_DIR/"
+cp "$ROOT/game/ladder_match.cfg" "$ROOT/game/ladder_hub.cfg" "$USER_DIR/"
 mkdir -p "$ADDONS" "$USER_DIR/sofplus/data/ladder_out"
 for f in "$ROOT/game/sofplus/addons/"*; do
   [ -f "$f" ] && cp "$f" "$ADDONS/"
