@@ -113,12 +113,33 @@ stateDiagram-v2
 
 Where each process must run, and what can be remote.
 
-| Component | Must co-locate with | Can run elsewhere? | Why |
-|-----------|---------------------|--------------------|-----|
-| **Wine SoF dedicated server** | **Orchestrator** (same host) | No | Orchestrator starts `wine sofmp.exe` via `subprocess`, monitors with **rcon to `127.0.0.1`**, reads optional SoFplus JSON from a **local path** (`SOF_LADDER_OUT_DIR`). |
-| **Orchestrator** | **SoF server** (same host) | No (for v1) | Not designed for SSH/remote spawn; expects `SOF_EXE`, `WINEPREFIX`, and ports on the local machine. |
-| **API + database** | Each other (same host recommended) | Bot/orchestrator can use a remote URL | v1 uses **SQLite** (`DATABASE_URL=sqlite:///./sof_ladder.db`) — the DB file must live on the API machine. Use **Postgres** if the API runs on a separate host. |
-| **Discord bot** | Nothing | **Yes** | Only needs outbound HTTPS to `API_BASE` and Discord. No game files or rcon. |
+### What each process is (four separate programs)
+
+These are **not** one monolith — you start up to **four Python processes** (plus Wine game servers when matches run):
+
+| What you run | Code | What it does |
+|--------------|------|----------------|
+| **API server** | `uvicorn backend.main:app` → [`backend/main.py`](backend/main.py) | HTTP REST API: players, Elo, queue, matches, DB reads/writes. **No Discord, no Wine.** |
+| **Discord bot** | `python -m bot.main` → [`bot/main.py`](bot/main.py) | Long-lived **discord.py** client: slash commands (`/link`, `/stats`), ladder channel **embed + buttons**, DMs for match accept/connect. Calls the API over HTTP — it does **not** implement ladder rules itself. |
+| **Orchestrator** | `python -m orchestrator.main` → [`orchestrator/main.py`](orchestrator/main.py) | Polls API for matches to host, **spawns/kills** local `wine sofmp.exe`, **rcon** poll for frags, posts results to API. **No Discord.** |
+| **SoF dedicated server** | `wine … sofmp.exe` (child of orchestrator) | Actual game sim players connect to over **UDP**. Not Python; one process per active match. |
+
+The row people confuse is the **Discord bot** (`bot/main.py`): it is only the Discord-facing UI layer. Players never “connect to the bot” for gameplay — they talk to Discord; the bot talks to your API; the API talks to the DB; the orchestrator runs the game.
+
+### Co-location rules
+
+| Component | Must co-locate with | Can run on another machine? | Why |
+|-----------|---------------------|-----------------------------|-----|
+| **Wine SoF dedicated server** (`sofmp.exe`) | **Orchestrator** | **No** | Spawned locally by orchestrator; rcon is `127.0.0.1`; SoFplus result files are local paths. |
+| **Orchestrator** (`orchestrator/main.py`) | **SoF server processes** | **No** (v1) | Expects `SOF_EXE`, `WINEPREFIX`, port pool on the same host. |
+| **API + database** (`backend/main.py` + DB file/Postgres) | Each other | Orchestrator/bot can point at a **remote** `API_BASE` | Default SQLite file must sit beside the API process; use Postgres if API is remote. |
+| **Discord bot** (`python -m bot.main`) | **Nothing** (no hard coupling) | **Yes** | Needs only: outbound HTTPS to `API_BASE` (your FastAPI URL) and outbound access to **Discord’s servers**. Does not need Wine, SoF assets, open game ports, or rcon. Typical split: bot on a small always-on box, API + orchestrator + game on the VPS. |
+
+**Discord bot detail** — if you run `python -m bot.main` on your laptop and `API_BASE=http://your-vps:8080` on the VPS:
+
+- Slash commands and the `#sof-ladder` embed work as long as the API is reachable and `DISCORD_BOT_TOKEN` / channel IDs are set.
+- Matchmaking, Elo, and match state still live on the VPS API/DB.
+- Game servers still spawn only on the machine running **orchestrator**; connect DMs use `SERVER_CONNECT_IP` from `.env` (the game host’s public IP), not the bot’s IP.
 
 ### Recommended (v1): single game VPS
 
@@ -162,11 +183,11 @@ flowchart TB
 |------|----------|----------------|
 | **Game VPS** | `orchestrator` + Wine/SoF | `API_BASE=https://your-api.example` (reachable URL), `SERVER_CONNECT_IP=<game VPS public IP>`, local `SOF_*` / `WINE*` paths |
 | **App host** | `backend` (API) + DB | `DATABASE_URL=postgres://...`, bind `0.0.0.0` or reverse proxy; open port to bot + orchestrator only |
-| **Any** | `bot` | `API_BASE` → app host; Discord token only |
+| **Any** (laptop, RPi, second VPS) | `python -m bot.main` | `API_BASE` → app host URL; `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_LADDER_CHANNEL_ID`; same `BOT_API_SECRET` as API expects |
 
 **Do not** run the orchestrator on a different machine than the SoF servers without code changes (remote spawn/rcon are not implemented).
 
-**Bot and API** on separate machines is fine: point both at the same `API_BASE` and share `BOT_API_SECRET` / `ORCHESTRATOR_SECRET`.
+**Bot (`bot/main.py`) and API (`backend/main.py`)** on separate machines is fine: set the bot’s `API_BASE` to the API’s URL and use the same `BOT_API_SECRET` in both `.env` files. The bot never touches the database directly.
 
 ### Quick reference
 
@@ -182,8 +203,9 @@ flowchart TB
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
-│  ANY HOST with internet                                  │
-│    bot/main.py  ──HTTP──►  API_BASE                      │
+│  ANY HOST with internet (optional split)                 │
+│    python -m bot.main  ──HTTPS──►  API_BASE              │
+│    (discord.py ↔ Discord; no game/Wine/rcon)             │
 └─────────────────────────────────────────────────────────┘
 ```
 
