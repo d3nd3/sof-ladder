@@ -4,7 +4,7 @@ Discord-driven ranked 1v1 deathmatch ladder for Soldier of Fortune. Players queu
 
 ## System architecture
 
-High-level parts on a single VPS (API, bot, orchestrator, and game servers colocated):
+Default **v1 layout: everything on one game VPS** (simplest). Components can be split in some cases — see [Deployment topology](#deployment-topology).
 
 ```mermaid
 flowchart TB
@@ -108,6 +108,84 @@ stateDiagram-v2
 | Bot | `bot/main.py` | Discord slash commands and ladder channel UI |
 | Orchestrator | `orchestrator/main.py` | Spawn Wine servers, rcon monitoring, results |
 | Game configs | `game/` | `ladder_match.cfg`, SoFplus `ladder_report` scripts |
+
+## Deployment topology
+
+Where each process must run, and what can be remote.
+
+| Component | Must co-locate with | Can run elsewhere? | Why |
+|-----------|---------------------|--------------------|-----|
+| **Wine SoF dedicated server** | **Orchestrator** (same host) | No | Orchestrator starts `wine sofmp.exe` via `subprocess`, monitors with **rcon to `127.0.0.1`**, reads optional SoFplus JSON from a **local path** (`SOF_LADDER_OUT_DIR`). |
+| **Orchestrator** | **SoF server** (same host) | No (for v1) | Not designed for SSH/remote spawn; expects `SOF_EXE`, `WINEPREFIX`, and ports on the local machine. |
+| **API + database** | Each other (same host recommended) | Bot/orchestrator can use a remote URL | v1 uses **SQLite** (`DATABASE_URL=sqlite:///./sof_ladder.db`) — the DB file must live on the API machine. Use **Postgres** if the API runs on a separate host. |
+| **Discord bot** | Nothing | **Yes** | Only needs outbound HTTPS to `API_BASE` and Discord. No game files or rcon. |
+
+### Recommended (v1): single game VPS
+
+All four processes on the machine that runs Wine/SoF. This matches the systemd units in `deploy/` and the diagrams above.
+
+```mermaid
+flowchart LR
+  subgraph one_vps [One VPS - recommended]
+    Bot1[Bot]
+    API1[API + DB]
+    Orch1[Orchestrator]
+    Game1[Wine SoF servers]
+  end
+  Discord[Discord] --> Bot1
+  Bot1 --> API1
+  Orch1 --> API1
+  Orch1 --> Game1
+  Players((Players)) --> Game1
+```
+
+Set `SERVER_CONNECT_IP` to this VPS **public IP** so connect DMs point players at the right host.
+
+### Optional split layout
+
+Only split if you accept extra setup (Postgres, firewall rules, TLS on API).
+
+```mermaid
+flowchart TB
+  Discord[Discord] --> BotR[Bot anywhere]
+  BotR -->|API_BASE| APIR[API + Postgres]
+  subgraph game_vps [Game VPS - required pair]
+    OrchR[Orchestrator]
+    GameR[Wine SoF servers]
+  end
+  OrchR -->|API_BASE| APIR
+  OrchR --> GameR
+  Players((Players)) -->|UDP| GameR
+```
+
+| Host | Run here | `.env` notes |
+|------|----------|----------------|
+| **Game VPS** | `orchestrator` + Wine/SoF | `API_BASE=https://your-api.example` (reachable URL), `SERVER_CONNECT_IP=<game VPS public IP>`, local `SOF_*` / `WINE*` paths |
+| **App host** | `backend` (API) + DB | `DATABASE_URL=postgres://...`, bind `0.0.0.0` or reverse proxy; open port to bot + orchestrator only |
+| **Any** | `bot` | `API_BASE` → app host; Discord token only |
+
+**Do not** run the orchestrator on a different machine than the SoF servers without code changes (remote spawn/rcon are not implemented).
+
+**Bot and API** on separate machines is fine: point both at the same `API_BASE` and share `BOT_API_SECRET` / `ORCHESTRATOR_SECRET`.
+
+### Quick reference
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  SAME MACHINE (required)                                 │
+│    orchestrator/main.py  ←→  wine sofmp.exe (rcon :port) │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  SAME MACHINE (recommended v1)                           │
+│    backend/main.py  ←→  sqlite file or postgres          │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  ANY HOST with internet                                  │
+│    bot/main.py  ──HTTP──►  API_BASE                      │
+└─────────────────────────────────────────────────────────┘
+```
 
 ## Quick start (dev)
 
@@ -215,6 +293,8 @@ Slash commands are separate from the channel embed; the embed is only for queuei
 
 ## VPS / Wine server setup
 
+Run these on the **game VPS** (orchestrator + SoF must live here). API/bot can be on the same box for v1 — see [Deployment topology](#deployment-topology).
+
 1. Install: `wine`, `winetricks`, `xvfb`, Python 3.11+
 2. Install SoF 1.07f + SoFplus into `WINEPREFIX` (default `/opt/sof/wineprefix`)
 3. Copy game configs into the server user directory:
@@ -225,6 +305,8 @@ Slash commands are separate from the channel embed; the embed is only for queuei
 6. Create `SOF_LADDER_OUT_DIR` for SoFplus result JSON backups
 
 ## systemd (production)
+
+Install all three units on **one host** unless you are deliberately splitting bot/API onto another machine (orchestrator **always** stays on the game VPS).
 
 ```bash
 sudo cp -r . /opt/sof-ladder
