@@ -56,16 +56,53 @@ def _cleanup_match_files(mid: int, out_root: Path):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _dodger(rt: MatchRuntime) -> int:
+def _dodger(rt: MatchRuntime) -> int | None:
     if rt.ladder_uid_a in rt.connected_uids:
         return rt.player_b_id
     if rt.ladder_uid_b in rt.connected_uids:
         return rt.player_a_id
-    return rt.player_a_id
+    return None
 
 
-def _norm(name: str) -> str:
-    return name.strip().lower()
+def _cleanup_presence_uids(out_root: Path, *uids: str):
+    pres = out_root / "presence"
+    if not pres.is_dir():
+        return
+    for uid in uids:
+        if uid:
+            (pres / f"{uid}.cfg").unlink(missing_ok=True)
+
+
+def _finish_match(
+    client: httpx.AsyncClient,
+    mid: int,
+    *,
+    winner_id: int | None,
+    frags: dict | None = None,
+    dodger_id: int | None = None,
+    reason: str,
+):
+    body: dict = {"match_id": mid, "winner_id": winner_id, "reason": reason}
+    if frags:
+        body["frags"] = frags
+    if dodger_id is not None and winner_id is not None:
+        body["dodger_id"] = dodger_id
+    return api_post(client, "/internal/match-result", body)
+
+
+async def _handle_dodge_or_noshow(client: httpx.AsyncClient, mid: int, rt: MatchRuntime):
+    dodger = _dodger(rt)
+    if dodger is None:
+        await _finish_match(client, mid, winner_id=None, reason="no_show")
+        return
+    winner = rt.player_b_id if dodger == rt.player_a_id else rt.player_a_id
+    await _finish_match(
+        client,
+        mid,
+        winner_id=winner,
+        dodger_id=dodger,
+        reason="dodge",
+    )
 
 
 async def run_loop():
@@ -75,8 +112,17 @@ async def run_loop():
     sp = get_sof_paths()
     print(f"SoF install: {sp.install_dir} | user: {sp.user_subfolder} -> {sp.user_dir}")
     print(f"addons: {sp.addons_dir} | ladder_out: {out_root}")
+    n_abandon = services.reconcile_orchestrator_startup()
+    if n_abandon:
+        print(f"reconciled {n_abandon} orphaned match(es) from prior run")
     pool = PortPool()
+    pool.used = services.reserved_match_ports()
+    if pool.used:
+        print(f"reserved ports: {sorted(pool.used)}")
     runtimes: dict[int, MatchRuntime] = {}
+    orphan = out_root / "0"
+    if orphan.is_dir():
+        shutil.rmtree(orphan, ignore_errors=True)
     verify_proc = None
     verify_rcon = ""
     hub_proc = None
@@ -155,64 +201,44 @@ async def run_loop():
                     action = tick_match(rt)
                     if action and action.startswith("winner_id:"):
                         wid = int(action.split(":")[1])
-                        await api_post(
+                        await _finish_match(
                             client,
-                            "/internal/match-result",
-                            {"match_id": mid, "winner_id": wid, "frags": rt.frags, "reason": "completed (server_exit)"},
+                            mid,
+                            winner_id=wid,
+                            frags=rt.frags,
+                            reason="completed (server_exit)",
                         )
-                        finished.append((mid, wid, "completed"))
+                        finished.append(mid)
                     elif action == "dodge" or not rt.both_connected_at:
-                        dodger = _dodger(rt)
-                        winner = rt.player_b_id if dodger == rt.player_a_id else rt.player_a_id
-                        await api_post(
-                            client,
-                            "/internal/match-result",
-                            {"match_id": mid, "winner_id": winner, "dodger_id": dodger, "reason": "server_exit"},
-                        )
-                        finished.append((mid, winner, "server_exit"))
+                        await _handle_dodge_or_noshow(client, mid, rt)
+                        finished.append(mid)
                     continue
 
                 action = tick_match(rt)
                 if action == "dodge":
-                    dodger = _dodger(rt)
-                    winner = rt.player_b_id if dodger == rt.player_a_id else rt.player_a_id
-                    src = "rcon" if rt.used_rcon_fallback else "sofplus"
-                    await api_post(
-                        client,
-                        "/internal/match-result",
-                        {
-                            "match_id": mid,
-                            "winner_id": winner,
-                            "dodger_id": dodger,
-                            "reason": f"dodge ({src})",
-                        },
-                    )
-                    finished.append((mid, winner, "dodge"))
+                    await _handle_dodge_or_noshow(client, mid, rt)
+                    finished.append(mid)
                 elif action and action.startswith("winner_id:"):
                     wid = int(action.split(":")[1])
                     res = read_result(out_root, mid)
                     reason = f"completed ({res.end_reason if res else 'sofplus'})"
-                    if rt.used_rcon_fallback and not res:
-                        reason = "completed (rcon_fallback)"
-                    await api_post(
+                    await _finish_match(
                         client,
-                        "/internal/match-result",
-                        {
-                            "match_id": mid,
-                            "winner_id": wid,
-                            "frags": rt.frags,
-                            "reason": reason,
-                        },
+                        mid,
+                        winner_id=wid,
+                        frags=rt.frags,
+                        reason=reason,
                     )
-                    finished.append((mid, wid, "completed"))
+                    finished.append(mid)
 
-            for mid, _, _ in finished:
+            for mid in finished:
                 rt = runtimes.pop(mid, None)
                 if rt:
                     pool.free(rt.port)
                     if rt.process.poll() is None:
                         rt.process.terminate()
                     _cleanup_match_files(mid, out_root)
+                    _cleanup_presence_uids(out_root, rt.ladder_uid_a, rt.ladder_uid_b)
 
             await asyncio.sleep(4)
 

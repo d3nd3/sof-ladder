@@ -1,12 +1,14 @@
+import os
 import secrets
+import subprocess
 from pathlib import Path
 
 from ladder import identity
 from ladder.sof_paths import get_sof_paths
-from orchestrator.spawn import build_launch_cmd
 from orchestrator.sofplus_io import parse_cfg
+from orchestrator.spawn import _gametype
 
-VERIFY_PORT = int(__import__("os").getenv("VERIFY_SERVER_PORT", "28908"))
+VERIFY_PORT = int(os.getenv("VERIFY_SERVER_PORT", "28908"))
 
 
 def _ingest_verify_file(path: Path) -> bool:
@@ -34,12 +36,50 @@ def poll_verify_exports(out_root: Path) -> int:
 
 
 def spawn_verify_server() -> tuple[object, str]:
+    """Verify-only server (no ladder_matchid — avoids ladder_out/0/ pollution)."""
+    p = get_sof_paths()
+    wine = os.getenv("WINE", "wine")
+    xvfb = os.getenv("XVFB_RUN", "xvfb-run")
     pw = secrets.token_hex(4)
     rcon = secrets.token_hex(8)
-    args, env = build_launch_cmd(0, VERIFY_PORT, pw, rcon, "dm/jpntclx")
-    import subprocess
-
-    p = get_sof_paths()
+    env = {**os.environ, "WINEPREFIX": str(p.wineprefix)}
+    args = [
+        xvfb,
+        "-a",
+        wine,
+        str(p.exe),
+        "+set",
+        "user",
+        p.user_subfolder,
+        "+set",
+        "dedicated",
+        "1",
+        "+set",
+        "deathmatch",
+        _gametype(),
+        "+set",
+        "console",
+        "1",
+        "+set",
+        "hostport",
+        str(VERIFY_PORT),
+        "+set",
+        "ladder_matchid",
+        "",
+        "+set",
+        "hostname",
+        "SoF Ladder Verify",
+        "+set",
+        "password",
+        pw,
+        "+set",
+        "rcon_password",
+        rcon,
+        "+map",
+        "dm/jpntclx",
+        "+exec",
+        "ladder_verify.cfg",
+    ]
     log = p.log_dir / "verify-server.log"
     proc = subprocess.Popen(
         args,

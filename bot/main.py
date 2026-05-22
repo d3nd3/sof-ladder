@@ -81,7 +81,10 @@ class AcceptView(discord.ui.View):
                 ephemeral=True,
             )
             if m["status"] == "provisioning":
-                await notify_match_ready(interaction.client, self.match_id)
+                await interaction.followup.send(
+                    "Server is starting — connect info will arrive by DM when the port is ready.",
+                    ephemeral=True,
+                )
         except RuntimeError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
 
@@ -100,7 +103,11 @@ async def refresh_ladder_embed(client: discord.Client):
     )
     embed.add_field(name="In queue", value=str(qc["count"]), inline=True)
     embed.add_field(name="Map", value="dm/jpntclx", inline=True)
-    embed.add_field(name="Frag limit", value=str(settings.fraglimit), inline=True)
+    if os.getenv("SOF_DEATHMATCH", "4").strip() == "4":
+        loops = os.getenv("CTF_LOOPS", "10")
+        embed.add_field(name="Mode", value=f"CTF ({loops} loops)", inline=True)
+    else:
+        embed.add_field(name="Frag limit", value=str(settings.fraglimit), inline=True)
     view = LadderView()
     async for msg in ch.history(limit=10):
         if msg.author.id == client.user.id and msg.embeds:
@@ -130,8 +137,10 @@ async def notify_match_offer(client: discord.Client, match: dict):
 
 async def notify_match_ready(client: discord.Client, match_id: int):
     m = await api.get_match(match_id)
+    if not m.get("port"):
+        return
     ip = settings.server_connect_ip
-    port = m.get("port") or "TBD"
+    port = m["port"]
     for p in m.get("players", []):
         user = await client.fetch_user(int(p["discord_id"]))
         embed = discord.Embed(title=f"Match #{match_id} — connect now", color=0x00AA00)
@@ -297,7 +306,10 @@ async def cmd_accept(interaction: discord.Interaction, match_id: int):
         m = await api.accept(match_id, str(interaction.user.id))
         await interaction.response.send_message(f"Match #{match_id} status: `{m['status']}`", ephemeral=True)
         if m["status"] == "provisioning":
-            await notify_match_ready(bot, match_id)
+            await interaction.followup.send(
+                "Server is starting — connect info will arrive by DM when the port is ready.",
+                ephemeral=True,
+            )
     except RuntimeError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 

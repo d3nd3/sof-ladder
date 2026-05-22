@@ -4,7 +4,10 @@ import secrets
 import uuid
 from datetime import datetime, timedelta
 
+from ladder import states
 from ladder.db import get_db
+
+_LINK_BLOCKED = {states.QUEUED, states.MATCH_OFFER, states.IN_MATCH}
 
 VERIFY_TTL_MINUTES = 15
 # Readable by sp_sv_client_check (must use _sp_cl_info_ prefix)
@@ -30,7 +33,11 @@ def start_link(discord_id: str) -> dict:
     nonce = secrets.token_hex(16)
     exp = _expires(VERIFY_TTL_MINUTES)
     with get_db() as conn:
-        row = conn.execute("SELECT id FROM players WHERE discord_id=?", (discord_id,)).fetchone()
+        row = conn.execute("SELECT * FROM players WHERE discord_id=?", (discord_id,)).fetchone()
+        if row and row["state"] in _LINK_BLOCKED:
+            raise ValueError(
+                "leave queue or finish your match before re-linking (/link rotates your uid)"
+            )
         if row:
             conn.execute(
                 """UPDATE players SET ladder_uid=?, verify_nonce=?, verify_expires=?,

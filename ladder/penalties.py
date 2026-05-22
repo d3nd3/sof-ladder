@@ -58,6 +58,7 @@ def check_spam_queue(conn, player_id: int) -> bool:
 def clear_expired_cooldowns(conn):
     conn.execute(
         """UPDATE players SET state=?, cooldown_until=NULL, updated_at=?
-           WHERE state=? AND cooldown_until IS NOT NULL AND cooldown_until <= datetime('now')""",
-        (states.IDLE, _now(), states.COOLDOWN),
+           WHERE state IN (?, ?) AND cooldown_until IS NOT NULL
+           AND cooldown_until <= datetime('now')""",
+        (states.IDLE, _now(), states.COOLDOWN, states.SUSPENDED),
     )

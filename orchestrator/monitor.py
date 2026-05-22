@@ -2,8 +2,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import os
+
 from ladder.config import settings
 from orchestrator.sofplus_io import parse_cfg, tick_sofplus
+
+_CTF_MODE = os.getenv("SOF_DEATHMATCH", "4").strip() == "4"
+
+
+def _norm(name: str) -> str:
+    return name.strip().lower()
 
 
 @dataclass
@@ -41,6 +49,7 @@ def _uids_from_check_exports(out_root: Path, uid_a: str, uid_b: str) -> set[str]
 
 
 def tick_match_sofplus(rt: MatchRuntime) -> str | None:
+    expect = {_norm(rt.sof_name_a), _norm(rt.sof_name_b)} - {"", "?"}
     action, frags, both_at, _ = tick_sofplus(
         rt.out_root,
         rt.match_id,
@@ -50,7 +59,7 @@ def tick_match_sofplus(rt: MatchRuntime) -> str | None:
         rt.player_b_id,
         rt.started_at,
         rt.both_connected_at,
-        set(),
+        expect,
     )
     uid_set = _uids_from_check_exports(rt.out_root, rt.ladder_uid_a, rt.ladder_uid_b)
     rt.connected_uids = uid_set
@@ -62,11 +71,12 @@ def tick_match_sofplus(rt: MatchRuntime) -> str | None:
     if not rt.both_connected_at and datetime.utcnow() - rt.started_at > timedelta(minutes=5):
         return "dodge"
     if rt.both_connected_at:
-        fa, fb = rt.frags.get(rt.player_a_id, 0), rt.frags.get(rt.player_b_id, 0)
-        if fa >= settings.fraglimit:
-            return f"winner_id:{rt.player_a_id}"
-        if fb >= settings.fraglimit:
-            return f"winner_id:{rt.player_b_id}"
+        if not _CTF_MODE:
+            fa, fb = rt.frags.get(rt.player_a_id, 0), rt.frags.get(rt.player_b_id, 0)
+            if fa >= settings.fraglimit:
+                return f"winner_id:{rt.player_a_id}"
+            if fb >= settings.fraglimit:
+                return f"winner_id:{rt.player_b_id}"
         if len(uid_set) < 2 and datetime.utcnow() - rt.both_connected_at > timedelta(seconds=30):
             if rt.ladder_uid_a in uid_set:
                 return f"winner_id:{rt.player_a_id}"

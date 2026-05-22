@@ -415,6 +415,45 @@ def list_live_matches() -> list[dict]:
         return [get_match_with_players(r["id"]) for r in rows]
 
 
+def reserved_match_ports() -> set[int]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT port FROM matches WHERE status=? AND port IS NOT NULL",
+            (states.MATCH_LIVE,),
+        ).fetchall()
+        return {r["port"] for r in rows}
+
+
+def reconcile_orchestrator_startup() -> int:
+    """Abandon provisioning/live matches left from a crashed orchestrator."""
+    with get_db() as conn:
+        expire_stale_offers(conn)
+        prune_stale_queue(conn)
+        rows = conn.execute(
+            "SELECT id FROM matches WHERE status IN (?, ?)",
+            (states.MATCH_PROVISIONING, states.MATCH_LIVE),
+        ).fetchall()
+        for r in rows:
+            _abandon_match(conn, r["id"], "orchestrator_restart")
+        return len(rows)
+
+
+def _abandon_match(conn, match_id: int, reason: str):
+    m = conn.execute("SELECT * FROM matches WHERE id=?", (match_id,)).fetchone()
+    if not m:
+        return
+    conn.execute(
+        "UPDATE matches SET status=?, finished_at=? WHERE id=?",
+        (states.MATCH_CANCELLED, _now(), match_id),
+    )
+    for pid in (m["player_a_id"], m["player_b_id"]):
+        conn.execute(
+            "UPDATE players SET state=?, active_match_id=NULL, updated_at=? WHERE id=?",
+            (states.IDLE, _now(), pid),
+        )
+        penalties.log_penalty(conn, pid, reason, "abandon", match_id)
+
+
 def list_pending_offers() -> list[dict]:
     with get_db() as conn:
         expire_stale_offers(conn)
