@@ -18,9 +18,8 @@ def verify_orch(x_orchestrator_secret: str | None = Header(None)):
         raise HTTPException(401, "unauthorized")
 
 
-class LinkBody(BaseModel):
+class LinkStartBody(BaseModel):
     discord_id: str
-    sof_name: str
 
 
 class DiscordBody(BaseModel):
@@ -53,10 +52,10 @@ def health():
     return {"ok": True}
 
 
-@app.post("/players/link", dependencies=[Depends(verify_bot)])
-def link_player(body: LinkBody):
+@app.post("/players/link/start", dependencies=[Depends(verify_bot)])
+def link_start(body: LinkStartBody):
     try:
-        return services.link_player(body.discord_id, body.sof_name)
+        return services.link_start(body.discord_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -95,6 +94,16 @@ def queue_count():
     return {"count": services.queue_count()}
 
 
+@app.get("/matches/pending", dependencies=[Depends(verify_bot)])
+def pending_matches():
+    return [m for m in services.list_pending_offers() if m]
+
+
+@app.get("/matches/live", dependencies=[Depends(verify_bot)])
+def live_matches():
+    return [m for m in services.list_live_matches() if m]
+
+
 @app.post("/matches/{match_id}/accept", dependencies=[Depends(verify_bot)])
 def accept_match(match_id: int, body: AcceptBody):
     try:
@@ -114,16 +123,6 @@ def get_match(match_id: int):
 @app.get("/leaderboard", dependencies=[Depends(verify_bot)])
 def leaderboard(limit: int = 20):
     return services.leaderboard(limit)
-
-
-@app.get("/matches/pending", dependencies=[Depends(verify_bot)])
-def pending_matches():
-    return [m for m in services.list_pending_offers() if m]
-
-
-@app.get("/matches/live", dependencies=[Depends(verify_bot)])
-def live_matches():
-    return [m for m in services.list_live_matches() if m]
 
 
 @app.get("/internal/matches/active", dependencies=[Depends(verify_orch)])

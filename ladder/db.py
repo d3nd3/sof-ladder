@@ -5,7 +5,7 @@ from pathlib import Path
 from ladder.config import settings
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SCHEMA = _ROOT / "migrations" / "001_schema.sql"
+_MIGRATIONS = sorted((_ROOT / "migrations").glob("*.sql"))
 
 
 def _db_path() -> str:
@@ -33,4 +33,9 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        conn.executescript(_SCHEMA.read_text())
+        for path in _MIGRATIONS:
+            try:
+                conn.executescript(path.read_text())
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise

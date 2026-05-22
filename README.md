@@ -18,12 +18,13 @@ flowchart TB
     Bot["bot/main.py\ndiscord.py"]
     API["backend/main.py\nFastAPI"]
     DB[("SQLite / Postgres\nplayers matches queue")]
-    Orch["orchestrator/main.py\nspawn monitor rcon"]
+    Orch["orchestrator/main.py\nspawn + read SoFplus files"]
   end
 
-  subgraph game_host [Wine game process]
-    WineSrv["sofmp.exe dedicated\n+ ladder_match.cfg"]
-    SoFplus["SoFplus scripts\nladder_report optional"]
+  subgraph game_host [Wine on game VPS]
+    MatchSrv["Match servers\nPORT_START..END"]
+    VerifySrv["Verify server\nVERIFY_SERVER_PORT"]
+    SoFplus["SoFplus addons\nladder_match + ladder_check"]
   end
 
   Players((Players))
@@ -36,16 +37,47 @@ flowchart TB
   Bot -->|"Bearer BOT_API_SECRET"| API
   API --> DB
   Orch -->|"X-Orchestrator-Secret"| API
-  Orch -->|"UDP rcon"| WineSrv
-  Orch -->|"spawn xvfb-run wine"| WineSrv
-  WineSrv --> SoFplus
-  SoFplus -->|"JSON backup optional"| Orch
-  Players -->|"UDP connect"| WineSrv
+  Orch -->|"spawn match servers"| MatchSrv
+  Orch -->|"spawn while pending /link"| VerifySrv
+  MatchSrv --> SoFplus
+  VerifySrv --> SoFplus
+  SoFplus -->|"ladder_out/*.cfg"| Orch
+  Orch -.->|"rcon fallback\n(match results only)"| MatchSrv
+  Players -->|"UDP verify"| VerifySrv
+  Players -->|"UDP match"| MatchSrv
+```
+
+### Player link flow (`/link`)
+
+Verification is **required before queueing**. Identity uses SoFplus [`sp_sv_client_check`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html) — not rcon `dumpuser` or userinfo.
+
+```mermaid
+sequenceDiagram
+  participant P as Player
+  participant Bot as Discord bot
+  participant API as FastAPI
+  participant Orch as Orchestrator
+  participant V as Verify server
+  participant SP as ladder_check.func
+
+  P->>Bot: /link
+  Bot->>API: POST /players/link/start
+  API->>API: assign ladder_uid + verify_nonce
+  Bot->>P: DM launch cvars (_sp_cl_info_*)
+  Orch->>Orch: pending links → spawn verify server
+  P->>P: +set _sp_cl_info_ladder_uid + verify in shortcut
+  P->>V: UDP connect VERIFY_SERVER_PORT
+  V->>SP: client_begin → sp_sv_client_check
+  SP->>SP: .check collects uid + nonce
+  SP->>SP: sp_sc_cvar_save ladder_out/verify/ev_<nonce>.cfg
+  Orch->>Orch: poll_verify_exports
+  Orch->>API: confirm player (sof_name, linked_at)
+  Note over P: After link: keep only _sp_cl_info_ladder_uid on shortcut
 ```
 
 ### Match flow (1v1)
 
-From queue to Elo update:
+From queue to Elo update (both players must already be **verified** — `ladder_uid` set, `verify_nonce` cleared):
 
 ```mermaid
 sequenceDiagram
@@ -55,11 +87,13 @@ sequenceDiagram
   participant Bot as Discord bot
   participant API as FastAPI
   participant Orch as Orchestrator
-  participant Srv as Wine server
+  participant Srv as Match server
+  participant SP as ladder_match + ladder_check
 
   P1->>Ch: Find 1v1
   Ch->>Bot: button
   Bot->>API: POST /queue/join
+  Note over API: rejects if not verified
   P2->>Ch: Find 1v1
   Bot->>API: POST /queue/join
   API->>API: Elo pairing
@@ -74,10 +108,13 @@ sequenceDiagram
   Orch->>API: POST port assigned
   Bot->>P1: DM connect IP port password
   Bot->>P2: DM connect IP port password
-  P1->>Srv: connect
-  P2->>Srv: connect
+  P1->>Srv: connect (+set _sp_cl_info_ladder_uid)
+  P2->>Srv: connect (+set _sp_cl_info_ladder_uid)
+  Srv->>SP: sp_sv_client_check → presence/<uid>.cfg
   loop Every few seconds
-    Orch->>Srv: rcon status / frags
+    Orch->>Orch: read ladder_out/<id>/tmp + result.cfg
+    Orch->>Orch: read ladder_out/presence/*.cfg for uid presence
+    Note over Orch,SP: rcon only if match result export missing
   end
   Orch->>API: POST /internal/match-result
   API->>API: Elo update + idle
@@ -89,6 +126,7 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
   [*] --> idle
+  note right of idle: must be verified\n(/link + verify server)
   idle --> queued: Find1v1
   queued --> idle: LeaveQueue
   queued --> match_offer: paired
@@ -106,8 +144,8 @@ stateDiagram-v2
 |---------|--------|------|
 | API | `backend/main.py` | Players, queue, Elo, matches |
 | Bot | `bot/main.py` | Discord slash commands and ladder channel UI |
-| Orchestrator | `orchestrator/main.py` | Spawn Wine servers, rcon monitoring, results |
-| Game configs | `game/` | `ladder_match.cfg`, SoFplus `ladder_report` scripts |
+| Orchestrator | `orchestrator/main.py` | Spawn Wine servers; **read SoFplus export files**; rcon fallback |
+| Game configs | `game/` | `ladder_match.cfg`, `sofplus/addons/*.func` |
 
 ## Deployment topology
 
@@ -121,7 +159,7 @@ These are **not** one monolith — you start up to **four Python processes** (pl
 |--------------|------|----------------|
 | **API server** | `uvicorn backend.main:app` → [`backend/main.py`](backend/main.py) | HTTP REST API: players, Elo, queue, matches, DB reads/writes. **No Discord, no Wine.** |
 | **Discord bot** | `python -m bot.main` → [`bot/main.py`](bot/main.py) | Long-lived **discord.py** client: slash commands (`/link`, `/stats`), ladder channel **embed + buttons**, DMs for match accept/connect. Calls the API over HTTP — it does **not** implement ladder rules itself. |
-| **Orchestrator** | `python -m orchestrator.main` → [`orchestrator/main.py`](orchestrator/main.py) | Polls API for matches to host, **spawns/kills** local `wine sofmp.exe`, **rcon** poll for frags, posts results to API. **No Discord.** |
+| **Orchestrator** | `python -m orchestrator.main` → [`orchestrator/main.py`](orchestrator/main.py) | Polls API, **spawns/kills** `wine sofmp.exe`, watches **`user/sofplus/data/ladder_out/<match_id>/`** written by SoFplus ([`sp_sc_cvar_save`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html)). Uses **rcon only as fallback**. **No Discord.** |
 | **SoF dedicated server** | `wine … sofmp.exe` (child of orchestrator) | Actual game sim players connect to over **UDP**. Not Python; one process per active match. |
 
 The row people confuse is the **Discord bot** (`bot/main.py`): it is only the Discord-facing UI layer. Players never “connect to the bot” for gameplay — they talk to Discord; the bot talks to your API; the API talks to the DB; the orchestrator runs the game.
@@ -130,8 +168,8 @@ The row people confuse is the **Discord bot** (`bot/main.py`): it is only the Di
 
 | Component | Must co-locate with | Can run on another machine? | Why |
 |-----------|---------------------|-----------------------------|-----|
-| **Wine SoF dedicated server** (`sofmp.exe`) | **Orchestrator** | **No** | Spawned locally by orchestrator; rcon is `127.0.0.1`; SoFplus result files are local paths. |
-| **Orchestrator** (`orchestrator/main.py`) | **SoF server processes** | **No** (v1) | Expects `SOF_EXE`, `WINEPREFIX`, port pool on the same host. |
+| **Wine SoF dedicated server** (`sofmp.exe`) | **Orchestrator** | **No** | Spawned locally; SoFplus writes `ladder_out/<match_id>/*.cfg` beside the server; orchestrator reads those paths (rcon optional fallback). |
+| **Orchestrator** (`orchestrator/main.py`) | **SoF server processes** | **No** (v1) | Reads `SOF_INSTALL_DIR` (and overrides) from `.env`; spawns `SOF_EXE` under that tree. |
 | **API + database** (`backend/main.py` + DB file/Postgres) | Each other | Orchestrator/bot can point at a **remote** `API_BASE` | Default SQLite file must sit beside the API process; use Postgres if API is remote. |
 | **Discord bot** (`python -m bot.main`) | **Nothing** (no hard coupling) | **Yes** | Needs only: outbound HTTPS to `API_BASE` (your FastAPI URL) and outbound access to **Discord’s servers**. Does not need Wine, SoF assets, open game ports, or rcon. Typical split: bot on a small always-on box, API + orchestrator + game on the VPS. |
 
@@ -194,7 +232,8 @@ flowchart TB
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  SAME MACHINE (required)                                 │
-│    orchestrator/main.py  ←→  wine sofmp.exe (rcon :port) │
+│    orchestrator/main.py  ←→  wine sofmp.exe (match + verify) │
+│    ladder_out/ — verify/, presence/, <match_id>/            │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
@@ -214,23 +253,35 @@ flowchart TB
 ```bash
 cd sof-ladder
 python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+./venv/bin/pip install -r requirements.txt
 cp .env.example .env
-# Edit .env: BOT_API_SECRET, ORCHESTRATOR_SECRET, DISCORD_* 
+# Edit .env: BOT_API_SECRET, ORCHESTRATOR_SECRET, DISCORD_*, SOF_INSTALL_DIR, ...
 
-export PYTHONPATH=.
-python -c "from ladder.db import init_db; init_db()"
-
-# Terminal 1
-uvicorn backend.main:app --reload --port 8080
-
-# Terminal 2 (after Discord app + token)
-python -m bot.main
-
-# Terminal 3 (on VPS with SoF + Wine installed)
-python -m orchestrator.main
+chmod +x scripts/*.sh scripts/lib/common.sh
+./scripts/run-all.sh          # API → bot → orchestrator (background)
+./scripts/status.sh           # PIDs + API health + SoF paths
+./scripts/stop-all.sh         # stop everything
 ```
+
+Logs live under `.run/logs/` (`api.log`, `bot.log`, `orchestrator.log`).
+
+**Foreground** (separate terminals, API with reload):
+
+```bash
+./scripts/run-api.sh --fg
+./scripts/run-bot.sh --fg
+./scripts/run-orchestrator.sh --fg
+```
+
+| Script | Role |
+|--------|------|
+| [`scripts/run-all.sh`](scripts/run-all.sh) | Start all services in order |
+| [`scripts/stop-all.sh`](scripts/stop-all.sh) | Stop by PID files |
+| [`scripts/status.sh`](scripts/status.sh) | PIDs, `/health`, `ladder.sof_paths` |
+| [`scripts/run-api.sh`](scripts/run-api.sh) | API only |
+| [`scripts/run-bot.sh`](scripts/run-bot.sh) | Discord bot only |
+| [`scripts/run-orchestrator.sh`](scripts/run-orchestrator.sh) | Game orchestrator only |
+| [`scripts/install-game-configs.sh`](scripts/install-game-configs.sh) | Copy cfg/func into SoF user dir |
 
 ## Discord setup
 
@@ -293,7 +344,7 @@ The embed’s **In queue** count is refreshed when someone uses **Find 1v1**, **
 
 - One red embed in `#sof-ladder` with three buttons.
 - Clicking **Stats** without `/link` still works but shows `not linked`.
-- Queueing requires `/link <in_game_name>` first (ephemeral errors come from the API).
+- Queueing requires **`/link`** and verify-server confirmation first (ephemeral errors come from the API).
 
 #### Troubleshooting the panel
 
@@ -306,9 +357,116 @@ The embed’s **In queue** count is refreshed when someone uses **Find 1v1**, **
 
 Match offers and connect info are **not** on this embed — they are sent by **DM** (and the background poll for pending/live matches). Players must allow DMs from server members or use `/accept <match_id>`.
 
+## Player identity
+
+Discord display names and in-game nicknames are **not** trusted for account binding or match pairing. The ladder assigns a server-side **`ladder_uid`** (UUID) and proves you control the game client that holds it using SoFplus **`sp_sv_client_check`** — the same mechanism documented in the [SoFplus manual](https://sof1.megalag.org/sofplus/download/sofplus-manual.html) and used by community bots ([`info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func)).
+
+### How `sp_sv_client_check` works
+
+1. Server calls `sp_sv_client_check SLOT CHALLENGE CVAR` (8-char challenge, cvar name).
+2. The **client** reads that cvar locally and responds.
+3. SoFplus invokes the global **`.check(~slot, ~challenge, ~cvar, ~value)`** handler on the server.
+4. [`ladder_check.func`](game/sofplus/addons/ladder_check.func) accumulates uid/verify values per slot, then **`sp_sc_cvar_save`** writes a small cfg file under `user/sofplus/data/ladder_out/`.
+5. The orchestrator parses those files — **no rcon `dumpuser`** on the identity path.
+
+Only cvars with allowed prefixes can be checked, including: `cl_`, `ghl_`, `gl_`, `r_`, `scr_`, `vid_`, and **`_sp_cl_info_`**. We store ladder secrets under `_sp_cl_info_*` so they are readable via this API.
+
+### Client cvars (player sets in shortcut / `autoexec.cfg`)
+
+| Client cvar | When | Purpose |
+|-------------|------|---------|
+| `_sp_cl_info_ladder_uid` | **Always** after `/link` | Permanent account id (UUID from API). Queue, pairing, and presence use this. |
+| `_sp_cl_info_ladder_verify` | **Only during `/link`** | One-time nonce from Discord; proves you received the DM. Cleared in DB after confirm. |
+
+Example launch line from `/link` DM:
+
+```text
++set _sp_cl_info_ladder_uid "0875472d-7c4e-4fee-acf2-519308e1d441" +set _sp_cl_info_ladder_verify "a4319f98dab49dce35dfc87bb644d835"
+```
+
+No Quake **`u` userinfo** flag is required — these are normal client cvars queried by the server.
+
+**After verification**, remove the verify cvar from your shortcut and keep only:
+
+```text
++set _sp_cl_info_ladder_uid "<your-uuid-from-dm>"
+```
+
+### Verify server vs match servers
+
+| Server | Port | Spawned when | Identity behavior |
+|--------|------|--------------|-------------------|
+| **Verify** | `VERIFY_SERVER_PORT` (default `28908`) | Orchestrator sees pending `/link` rows | Reads **uid + verify** → `ladder_out/verify/ev_<nonce>.cfg` |
+| **Match** | `PORT_START` … `PORT_END` | Active ranked match | Reads **uid only** → `ladder_out/presence/<uid>.cfg` for dodge/forfeit detection |
+
+Both load `ladder_report.cfg` → `ladder_check.func` + `ladder_match.func`. Install with [`scripts/install-game-configs.sh`](scripts/install-game-configs.sh).
+
+### Link verification (step by step)
+
+1. Run **`/link`** in Discord (ephemeral embed with launch cvars).
+2. API assigns `ladder_uid` + `verify_nonce` (15 min TTL in DB).
+3. Add both `+set` lines to your SoF shortcut or `autoexec.cfg`.
+4. Connect to **`SERVER_CONNECT_IP:VERIFY_SERVER_PORT`** while the window is open.
+5. On join, `ladder_check` probes the slot (and retries on a timer) with `sp_sv_client_check`.
+6. When both cvars are read, SoFplus writes `ladder_out/verify/ev_<nonce>.cfg` (includes slot, uid, nonce, `_sp_sv_info_client_name`, IP).
+7. Orchestrator [`poll_verify_exports`](orchestrator/verify.py) calls [`try_confirm_from_check`](ladder/identity.py) → sets `sof_name`, `linked_at`, clears `verify_nonce`.
+8. **`/stats`** shows your linked name; you may queue.
+
+```mermaid
+flowchart LR
+  subgraph client [Player PC]
+    Shortcut["shortcut / autoexec\n_sp_cl_info_*"]
+    SoF["SoF client"]
+    Shortcut --> SoF
+  end
+  subgraph vps [Game VPS]
+    Orch[Orchestrator]
+    VSrv[Verify sofmp]
+    Check[ladder_check.func]
+    Disk["ladder_out/verify/\nev_<nonce>.cfg"]
+    API[(API + DB)]
+    Orch --> VSrv
+    VSrv --> Check
+    Check --> Disk
+    Orch --> Disk
+    Orch --> API
+  end
+  Discord["/link DM"] --> Shortcut
+  SoF -->|"UDP"| VSrv
+```
+
+### Database fields
+
+| Column | Meaning |
+|--------|---------|
+| `ladder_uid` | UUID; permanent identity for queue/match |
+| `verify_nonce` | Set during `/link`; `NULL` after confirmed |
+| `verify_expires` | UTC expiry for pending link |
+| `sof_name` | In-game name captured at verify (display only) |
+| `linked_at` | When verify succeeded |
+
+Queue join ([`ladder/identity.is_verified`](ladder/identity.py)): `ladder_uid` present **and** `verify_nonce` is `NULL`.
+
+### Export files (under `SOF_LADDER_OUT_DIR`)
+
+| Path | Written when | Consumed by |
+|------|--------------|-------------|
+| `verify/ev_<nonce>.cfg` | Verify server; uid **and** verify nonce read | [`poll_verify_exports`](orchestrator/verify.py) |
+| `presence/<ladder_uid>.cfg` | Any server; uid read (verify cvar empty) | [`monitor._uids_from_check_exports`](orchestrator/monitor.py) |
+| `<match_id>/tmp_player_*.cfg` | Match server snapshots | Frags, names, dodge timing |
+| `<match_id>/result.cfg` | Map end | Winner / Elo |
+
+### Security properties
+
+- **Active read** — server requests cvar values from the client; not spoofable by choosing someone else's nickname alone.
+- **Server-assigned uid** — players cannot pick their own `ladder_uid`.
+- **One-time nonce** — ties the Discord session to a single client config; expires in ~15 minutes.
+- **SoFplus-native** — no dependency on rcon `dumpuser` parsing for identity.
+- **Match pairing** — orchestrator matches connected `ladder_uid` values to the two players provisioned for the match (presence + snapshots), not display names alone.
+
 ### Commands
 
-- `/link <in_game_name>` — required before queueing
+- `/link` — issue uid + verify nonce; DM launch cvars + verify server address
 - `/stats`, `/leaderboard`, `/cancel`, `/accept <match_id>`
 
 Slash commands are separate from the channel embed; the embed is only for queueing and at-a-glance queue size.
@@ -318,13 +476,67 @@ Slash commands are separate from the channel embed; the embed is only for queuei
 Run these on the **game VPS** (orchestrator + SoF must live here). API/bot can be on the same box for v1 — see [Deployment topology](#deployment-topology).
 
 1. Install: `wine`, `winetricks`, `xvfb`, Python 3.11+
-2. Install SoF 1.07f + SoFplus into `WINEPREFIX` (default `/opt/sof/wineprefix`)
-3. Copy game configs into the server user directory:
-   - `game/ladder_match.cfg` → `$SOF_CWD/user/ladder_match.cfg`
-   - `game/sofplus/*.cfg` → `$SOF_CWD/user/sofplus/sv/`
-4. Open UDP ports `PORT_START`–`PORT_END` (default 28910–28959)
-5. Set `SERVER_CONNECT_IP` to your public IP
-6. Create `SOF_LADDER_OUT_DIR` for SoFplus result JSON backups
+2. Set **`SOF_INSTALL_DIR`** in `.env` to your SoF root (exe, `user/`, `wineprefix/`, etc.). Derived paths:
+
+   | Variable | Default when unset |
+   |----------|-------------------|
+   | `SOF_EXE` | `$SOF_INSTALL_DIR/sofmp.exe` |
+   | `SOF_CWD` | `$SOF_INSTALL_DIR` |
+   | `SOF_USER_SUBFOLDER` | `user` — passed to `+set user`; data at `$SOF_CWD/<subfolder>/` |
+   | `SOF_USER_DIR` | `$SOF_CWD/$SOF_USER_SUBFOLDER` |
+   | `SOF_DEATHMATCH` | `4` (CTF) on server launch |
+   | `WINEPREFIX` | `$SOF_INSTALL_DIR/wineprefix` |
+   | `SOF_LADDER_OUT_DIR` | `$SOF_USER_DIR/sofplus/data/ladder_out` |
+   | `SOF_LADDER_LOG_DIR` | `/var/log/sof-ladder` |
+
+   Check resolved paths: `PYTHONPATH=. python -m ladder.sof_paths`
+
+3. Install SoF 1.07f + SoFplus into that tree, then ladder scripts ([`info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func) pattern):
+   ```bash
+   ./scripts/install-game-configs.sh
+   ```
+   Uses `SOF_INSTALL_DIR` and `SOF_USER_SUBFOLDER` from `.env`. Copies `ladder_match.cfg` to the user folder and `game/sofplus/addons/*` to `$USER_DIR/sofplus/addons/` (same layout as [sof-discord-bot `info_client.func`](https://github.com/VirtualFj8/sof-discord-bot/blob/main/sofplus/addons/info_client.func)).
+
+   Server launch (orchestrator): `+set user <SOF_USER_SUBFOLDER>` `+set dedicated 1` `+set deathmatch 4` then map/cfg exec.
+5. Open UDP ports `VERIFY_SERVER_PORT` (default `28908`) and `PORT_START`–`PORT_END` (match servers)
+6. Set `SERVER_CONNECT_IP` to your public IP
+
+## Match data: SoFplus first, rcon fallback
+
+The orchestrator does **not** rely on rcon for normal results. It mirrors the community **info_client** pattern: the server dumps cvars to text files under `user/sofplus/data/` using [`sp_sc_cvar_save`](https://sof1.megalag.org/sofplus/download/sofplus-manual.html).
+
+| File (under `ladder_out/<match_id>/`) | Written when | Used for |
+|---------------------------------------|--------------|----------|
+| `presence/<ladder_uid>.cfg` | Match/verify join (`ladder_check`) | Which provisioned uids are connected |
+| `tmp_player_<slot>.cfg` | Every ~5s + on connect (`ladder_snapshot`) | Live frags, names, dodge timing |
+| `player_<slot>.cfg` | Map end | Final per-player `_sp_sv_info_client_*` dump |
+| `result.cfg` | Map end (`ladder_match_map_end`) | `ladder_ready`, `ladder_winner_name`, `ladder_end_reason`, `fraglimit` / `timelimit` logic |
+
+Server launch sets `+set ladder_matchid <id>` so exports land in the correct folder. Match logic: [`game/sofplus/addons/ladder_match.func`](game/sofplus/addons/ladder_match.func). Identity probes: [`ladder_check.func`](game/sofplus/addons/ladder_check.func) (shared with verify server).
+
+**Rcon fallback** ([`orchestrator/monitor.py`](orchestrator/monitor.py)): used only if `result.cfg` is not ready and snapshots are empty — e.g. SoFplus script missing, wrong install path, or non-ladder server. Keeps the pathway for future debugging.
+
+```mermaid
+flowchart LR
+  subgraph server [Wine SoF match server]
+    Match[ladder_match.func]
+    Check[ladder_check.func]
+    Save[sp_sc_cvar_save]
+  end
+  subgraph disk [ladder_out/]
+    Tmp["42/tmp_player_*.cfg"]
+    Res[42/result.cfg]
+    Pres[presence/uid.cfg]
+  end
+  Orch[orchestrator]
+  Match --> Save --> Tmp
+  Match --> Save --> Res
+  Check --> Save --> Pres
+  Orch --> Tmp
+  Orch --> Res
+  Orch --> Pres
+  Orch -.->|if no result.cfg| Rcon[rcon status]
+```
 
 ## systemd (production)
 

@@ -1,0 +1,87 @@
+// Ladder identity via sp_sv_client_check + client _sp_cl_info_* cvars
+// https://sof1.megalag.org/sofplus/download/sofplus-manual.html — sp_sv_client_check / .check
+
+function ladder_check_init()
+{
+  sp_sc_func_exec spf_sc_list_add_func _sp_sv_on_client_begin "ladder_check_on_join"
+}
+
+function ladder_check_on_join(~slot)
+{
+  sp_sc_func_exec ladder_probe_slot #~slot
+  sset ~again sp_sc_func_exec ladder_probe_slot #~slot
+  sp_sc_timer 80 #~again
+}
+
+function ladder_probe_slot(~slot)
+{
+  zero _sp_sv_info_client_ip
+  sp_sv_info_client #~slot
+  sp_sc_flow_if text cvar _sp_sv_info_client_ip == val ""
+  {
+    sp_sc_func_exec ladder_match_skip
+  }
+  else
+  {
+    sp_sc_cvar_random_int _ladder_rnd 10000000 99999999
+    sp_sc_cvar_sset ~ch8 _ladder_rnd
+    sp_sc_cvar_substr ~ch8 ~ch8 0 8
+    sp_sv_client_check #~slot #~ch8 _sp_cl_info_ladder_uid
+    sp_sv_client_check #~slot #~ch8 _sp_cl_info_ladder_verify
+  }
+}
+
+function .check(~slot, ~challenge, ~cvar, ~value)
+{
+  sp_sc_flow_if itext cvar ~cvar == val _sp_cl_info_ladder_uid
+  {
+    sp_sc_cvar_sset ~uk _ladder_ck_uid_
+    sp_sc_cvar_append ~uk #~slot
+    sp_sc_cvar_copy #~uk #~value
+  }
+  sp_sc_flow_if itext cvar ~cvar == val _sp_cl_info_ladder_verify
+  {
+    sp_sc_cvar_sset ~vk _ladder_ck_vfy_
+    sp_sc_cvar_append ~vk #~slot
+    sp_sc_cvar_copy #~vk #~value
+  }
+  sp_sc_func_exec ladder_check_flush #~slot
+}
+
+function ladder_check_flush(~slot)
+{
+  sp_sc_cvar_sset ~uk _ladder_ck_uid_
+  sp_sc_cvar_append ~uk #~slot
+  sp_sc_cvar_sset ~vk _ladder_ck_vfy_
+  sp_sc_cvar_append ~vk #~slot
+  sp_sc_flow_if text cvar #~uk == val ""
+  {
+    sp_sc_func_exec ladder_match_skip
+  }
+  else
+  {
+    sp_sc_cvar_copy _sp_cl_info_ladder_uid #~uk
+    zero _sp_sv_info_client_ip
+    sp_sv_info_client #~slot
+    set slot #~slot
+    sp_sc_flow_if text cvar #~vk != val ""
+    {
+      sp_sc_cvar_copy _sp_cl_info_ladder_verify #~vk
+      sp_sc_cvar_sset ~vf ladder_out/verify/ev_
+      sp_sc_cvar_append ~vf #~vk
+      sp_sc_cvar_append ~vf .cfg
+      sp_sc_cvar_save #~vf slot _sp_cl_info_ladder_uid _sp_cl_info_ladder_verify _sp_sv_info_client_name _sp_sv_info_client_ip
+      echo LADDER_CHECK_OK
+    }
+    else
+    {
+      sp_sc_cvar_sset ~vf ladder_out/presence/
+      sp_sc_cvar_append ~vf #~uk
+      sp_sc_cvar_append ~vf .cfg
+      sp_sc_cvar_save #~vf slot _sp_cl_info_ladder_uid _sp_sv_info_client_name _sp_sv_info_client_ip
+      echo LADDER_PRESENCE_OK
+    }
+    sp_sc_cvar_sset _ladder_ck_uid_
+    sp_sc_cvar_sset _ladder_ck_vfy_
+  }
+}

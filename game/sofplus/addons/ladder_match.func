@@ -1,0 +1,229 @@
+// SoF Ladder — export match data via sp_sc_cvar_save (see info_client.func pattern)
+// Install to USER_SUBFOLDER/sofplus/addons/ladder_match.func
+// Requires +set ladder_matchid <id> on server launch
+
+function ladder_match_init()
+{
+  sp_sc_func_exec spf_sc_list_add_func _sp_sv_on_map_begin "ladder_match_map_begin"
+  sp_sc_func_exec spf_sc_list_add_func _sp_sv_on_map_end "ladder_match_map_end"
+  sp_sc_func_exec spf_sc_list_add_func _sp_sv_on_client_begin "ladder_client_begin"
+  sp_sc_func_exec ladder_match_map_begin
+}
+
+function ladder_match_skip()
+{
+  sp_sc_flow_if text cvar ladder_matchid == val ""
+  {
+    sp_sc_func_exec ladder_snapshot_reschedule_stop
+  }
+}
+
+function ladder_out_prefix()
+{
+  sp_sc_cvar_sset _ladder_out_prefix ladder_out/
+  sp_sc_cvar_append _ladder_out_prefix ladder_matchid
+  sp_sc_cvar_append _ladder_out_prefix /
+}
+
+function ladder_snapshot_reschedule_stop()
+{
+  set _ladder_snap_on 0
+}
+
+function ladder_snapshot_reschedule()
+{
+  sp_sc_flow_if text cvar ladder_matchid == val ""
+  {
+    sp_sc_func_exec ladder_snapshot_reschedule_stop
+  }
+  else
+  {
+    sp_sc_flow_if number cvar _ladder_snap_on == val 1
+    {
+      sset ~snap_cmd sp_sc_func_exec ladder_snapshot
+      sp_sc_timer 50 #~snap_cmd
+    }
+  }
+}
+
+function ladder_snapshot()
+{
+  sp_sc_flow_if text cvar ladder_matchid == val ""
+  {
+    sp_sc_func_exec ladder_match_skip
+  }
+  else
+  {
+    sp_sc_func_exec ladder_out_prefix
+    set ~slot 0
+    sp_sc_flow_while number cvar ~slot < cvar maxclients
+    {
+      sp_sc_cvar_sset ~tmpf #_ladder_out_prefix tmp_player_
+      sp_sc_cvar_append ~tmpf ~slot
+      sp_sc_cvar_append ~tmpf .cfg
+      zero _sp_sv_info_client_ip
+      sp_sv_info_client #~slot
+      sp_sc_flow_if text cvar _sp_sv_info_client_ip != val ""
+      {
+        sp_sc_cvar_save #~tmpf _sp_sv_info_client_*
+      }
+      else
+      {
+        sp_sc_file_find ~f sofplus/data/#~tmpf filesystem file
+        sp_sc_flow_if number cvar ~f_0 == val 1
+        {
+          sp_sc_cvar_save #~tmpf ""
+        }
+      }
+      add ~slot 1
+    }
+    sp_sc_func_exec ladder_snapshot_reschedule
+  }
+}
+
+function ladder_client_begin(~slot)
+{
+  sp_sc_flow_if text cvar ladder_matchid != val ""
+  {
+    sp_sc_func_exec ladder_snapshot
+  }
+}
+
+function ladder_match_map_begin()
+{
+  set _ladder_snap_on 0
+  set ladder_ready "0"
+  sp_sc_flow_if text cvar ladder_matchid == val ""
+  {
+    sp_sc_func_exec ladder_match_skip
+  }
+  else
+  {
+    set _ladder_snap_on 1
+    sp_sc_func_exec ladder_snapshot
+  }
+}
+
+function ladder_save_player(~slot)
+{
+  sp_sc_func_exec ladder_out_prefix
+  sp_sc_cvar_sset ~pf #_ladder_out_prefix player_
+  sp_sc_cvar_append ~pf ~slot
+  sp_sc_cvar_append ~pf .cfg
+  zero _sp_sv_info_client_ip
+  sp_sv_info_client #~slot
+  sp_sc_flow_if text cvar _sp_sv_info_client_ip != val ""
+  {
+    sp_sc_cvar_save #~pf _sp_sv_info_client_*
+  }
+}
+
+function ladder_match_map_end()
+{
+  sp_sc_flow_if text cvar ladder_matchid == val ""
+  {
+    sp_sc_func_exec ladder_match_skip
+  }
+  else
+  {
+    set _ladder_snap_on 0
+
+    set ~i 0
+    set ~max_frags 0
+    set ~max_time 0
+    set ~players 0
+    set ~winner_name ""
+    set ~winner_frags 0
+    set ~end_reason "unknown"
+    set ~winner_slot "-1"
+
+    sp_sc_flow_while number cvar ~i < cvar maxclients
+    {
+      zero _sp_sv_info_client_ip
+      sp_sv_info_client #~i
+      sp_sc_flow_if text cvar _sp_sv_info_client_ip != val ""
+      {
+        add ~players 1
+        sp_sc_flow_if number cvar _sp_sv_info_client_frags > cvar ~max_frags
+        {
+          sp_sc_cvar_copy ~max_frags _sp_sv_info_client_frags
+          sp_sc_cvar_copy ~winner_name _sp_sv_info_client_name
+          set ~winner_slot #~i
+        }
+        sp_sc_flow_if number cvar _sp_sv_info_client_frames_total > cvar ~max_time
+        {
+          sp_sc_cvar_copy ~max_time _sp_sv_info_client_frames_total
+        }
+      }
+      sp_sc_func_exec ladder_save_player #~i
+      add ~i 1
+    }
+
+    sp_sc_info_time
+    sp_sc_cvar_copy ~gametime _sp_sc_info_time_sec
+    sp_sc_cvar_copy ~timelimit timelimit
+    sp_sc_cvar_math_mul ~timelimit 60
+
+    sp_sc_flow_if number cvar timelimit > val 0
+    {
+      sp_sc_flow_if number cvar ~gametime >= cvar ~timelimit
+      {
+        set ~end_reason "timelimit"
+      }
+    }
+
+    sp_sc_flow_if text cvar ~end_reason == val "unknown"
+    {
+      sp_sc_flow_if number cvar fraglimit > val 0
+      {
+        sp_sc_flow_if number cvar ~max_frags >= cvar fraglimit
+        {
+          set ~end_reason "fraglimit"
+        }
+      }
+    }
+
+    sp_sc_flow_if text cvar ~end_reason == val "unknown"
+    {
+      sp_sc_flow_if number cvar deathmatch == val 4
+      {
+        sp_sc_flow_if number cvar ctf_loops > val 0
+        {
+          set ~end_reason "flaglimit"
+          sp_sc_cvar_substr ~blue_flag_state _sp_sv_info_flag_blue 0 1
+          sp_sc_flow_if text cvar ~blue_flag_state == val "r"
+          {
+            set ~winner_team "red"
+            sp_sc_cvar_substr ~winner_slot _sp_sv_info_flag_blue 1 2
+          }
+          else
+          {
+            set ~winner_team "blue"
+            sp_sc_cvar_substr ~winner_slot _sp_sv_info_flag_red 1 2
+          }
+          sp_sv_info_client #~winner_slot
+          sp_sc_cvar_copy ~winner_name _sp_sv_info_client_name
+        }
+      }
+    }
+
+    sp_sc_flow_if text cvar ~end_reason == val "unknown"
+    {
+      set ~end_reason "map_end"
+    }
+
+    set ladder_end_reason #~end_reason
+    set ladder_winner_name #~winner_name
+    set ladder_winner_slot #~winner_slot
+    set ladder_winner_frags #~max_frags
+    set ladder_player_count #~players
+    set ladder_ready "1"
+
+    sp_sc_func_exec ladder_out_prefix
+    sp_sc_cvar_append _ladder_out_prefix result.cfg
+    sp_sc_cvar_save #_ladder_out_prefix ladder_matchid ladder_ready ladder_end_reason ladder_winner_name ladder_winner_slot ladder_winner_frags ladder_player_count fraglimit timelimit deathmatch ctf_loops hostname _sp_sv_info_map_current _sp_sv_info_flag_blue _sp_sv_info_flag_red
+
+    sp_sc_func_exec ladder_snapshot
+    echo LADDER_MATCH_RESULT_READY
+  }
+}

@@ -38,16 +38,28 @@ class QuakeRcon:
         payload = _packet(f"rcon {ch} {self.password} {cmd}")
         return self._send_recv(payload)
 
-    def players_status(self) -> list[dict]:
-        """Parse status output; fallback empty."""
-        out = self.command("status")
-        players = []
+    def dumpuser(self, slot: int) -> dict[str, str]:
+        """Parse dumpuser output into lowercase keys."""
+        out = self.command(f"dumpuser {slot}")
+        data: dict[str, str] = {}
         for line in out.splitlines():
             line = line.strip()
-            if not line or line.startswith("---") or "hostname" in line.lower():
+            if not line or line.startswith("---"):
                 continue
-            # slot name ... score ping
-            parts = line.split()
-            if len(parts) >= 3 and parts[0].isdigit():
-                players.append({"slot": int(parts[0]), "name": parts[1], "raw": line})
-        return players
+            if ":" in line:
+                k, _, v = line.partition(":")
+                data[k.strip().lower()] = v.strip().strip('"')
+            else:
+                m = re.match(r"^user\s+(\d+):", line, re.I)
+                if m:
+                    data["slot"] = m.group(1)
+        return data
+
+    def all_userinfo(self, max_slots: int = 16) -> list[dict[str, str]]:
+        users = []
+        for slot in range(max_slots):
+            info = self.dumpuser(slot)
+            if info.get("name") or info.get("ladder_uid") or info.get("ip"):
+                info["slot"] = str(slot)
+                users.append(info)
+        return users

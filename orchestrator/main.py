@@ -1,18 +1,25 @@
 import asyncio
-import os
+import shutil
 from pathlib import Path
 
 import httpx
 
 from ladder.config import settings
 from ladder.db import init_db
+from ladder.sof_paths import get_sof_paths
 from ladder import services
 from orchestrator.monitor import MatchRuntime, tick_match
 from orchestrator.spawn import spawn_server
+from ladder import identity
+from orchestrator.sofplus_io import match_dir, read_result
+from orchestrator.verify import VERIFY_PORT, poll_verify_exports, spawn_verify_server
 
 API = settings.api_base.rstrip("/")
 ORCH_HEADERS = {"X-Orchestrator-Secret": settings.orchestrator_secret}
-OUT_DIR = Path(os.getenv("SOF_LADDER_OUT_DIR", "/opt/sof/user/sofplus/data/ladder_out"))
+
+
+def _out_root() -> Path:
+    return get_sof_paths().ladder_out
 
 
 class PortPool:
@@ -42,13 +49,48 @@ async def api_post(client: httpx.AsyncClient, path: str, body: dict):
     return r.json()
 
 
+def _cleanup_match_files(mid: int, out_root: Path):
+    d = match_dir(out_root, mid)
+    if d.is_dir():
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _dodger(rt: MatchRuntime) -> int:
+    if rt.ladder_uid_a in rt.connected_uids:
+        return rt.player_b_id
+    if rt.ladder_uid_b in rt.connected_uids:
+        return rt.player_a_id
+    return rt.player_a_id
+
+
+def _norm(name: str) -> str:
+    return name.strip().lower()
+
+
 async def run_loop():
     init_db()
+    out_root = _out_root()
+    out_root.mkdir(parents=True, exist_ok=True)
+    sp = get_sof_paths()
+    print(f"SoF install: {sp.install_dir} | user: {sp.user_subfolder} -> {sp.user_dir}")
+    print(f"addons: {sp.addons_dir} | ladder_out: {out_root}")
     pool = PortPool()
     runtimes: dict[int, MatchRuntime] = {}
+    verify_proc = None
+    verify_rcon = ""
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
+            pending = identity.list_pending_verifications()
+            if pending:
+                if verify_proc is None or verify_proc.poll() is not None:
+                    verify_proc, verify_rcon = spawn_verify_server()
+                    print(f"verify server on {VERIFY_PORT}")
+                poll_verify_exports(out_root)
+            elif verify_proc is not None and verify_proc.poll() is None:
+                verify_proc.terminate()
+                verify_proc = None
+
             try:
                 matches = await api_get(client, "/internal/matches/active")
             except Exception as e:
@@ -68,6 +110,7 @@ async def run_loop():
                     continue
                 full = services.get_match_with_players(mid)
                 pa, pb = full["players"][0], full["players"][1]
+                _cleanup_match_files(mid, out_root)
                 proc = spawn_server(
                     mid, port, m["password"], m["rcon_password"], m.get("map_name", "dm/jpntclx")
                 )
@@ -78,34 +121,60 @@ async def run_loop():
                     rcon_password=m["rcon_password"],
                     player_a_id=pa["id"],
                     player_b_id=pb["id"],
-                    sof_name_a=pa["sof_name"],
-                    sof_name_b=pb["sof_name"],
+                    ladder_uid_a=pa["ladder_uid"] or "",
+                    ladder_uid_b=pb["ladder_uid"] or "",
+                    sof_name_a=pa.get("sof_name") or "?",
+                    sof_name_b=pb.get("sof_name") or "?",
                     process=proc,
+                    out_root=out_root,
                 )
-                print(f"spawned match {mid} on {port}")
+                print(f"spawned match {mid} on {port} (SoFplus export -> {match_dir(out_root, mid)})")
 
             finished = []
             for mid, rt in list(runtimes.items()):
                 if rt.process.poll() is not None:
-                    finished.append((mid, None, "server_exit"))
+                    action = tick_match(rt)
+                    if action and action.startswith("winner_id:"):
+                        wid = int(action.split(":")[1])
+                        await api_post(
+                            client,
+                            "/internal/match-result",
+                            {"match_id": mid, "winner_id": wid, "frags": rt.frags, "reason": "completed (server_exit)"},
+                        )
+                        finished.append((mid, wid, "completed"))
+                    elif action == "dodge" or not rt.both_connected_at:
+                        dodger = _dodger(rt)
+                        winner = rt.player_b_id if dodger == rt.player_a_id else rt.player_a_id
+                        await api_post(
+                            client,
+                            "/internal/match-result",
+                            {"match_id": mid, "winner_id": winner, "dodger_id": dodger, "reason": "server_exit"},
+                        )
+                        finished.append((mid, winner, "server_exit"))
                     continue
+
                 action = tick_match(rt)
-                if not action:
-                    # backup: ladder_out json from SoFplus
-                    jf = OUT_DIR / f"{mid}.json"
-                    if jf.exists():
-                        action = f"winner_id:{_winner_from_json(jf, rt)}"
                 if action == "dodge":
                     dodger = _dodger(rt)
                     winner = rt.player_b_id if dodger == rt.player_a_id else rt.player_a_id
+                    src = "rcon" if rt.used_rcon_fallback else "sofplus"
                     await api_post(
                         client,
                         "/internal/match-result",
-                        {"match_id": mid, "winner_id": winner, "dodger_id": dodger, "reason": "dodge"},
+                        {
+                            "match_id": mid,
+                            "winner_id": winner,
+                            "dodger_id": dodger,
+                            "reason": f"dodge ({src})",
+                        },
                     )
                     finished.append((mid, winner, "dodge"))
                 elif action and action.startswith("winner_id:"):
                     wid = int(action.split(":")[1])
+                    res = read_result(out_root, mid)
+                    reason = f"completed ({res.end_reason if res else 'sofplus'})"
+                    if rt.used_rcon_fallback and not res:
+                        reason = "completed (rcon_fallback)"
                     await api_post(
                         client,
                         "/internal/match-result",
@@ -113,7 +182,7 @@ async def run_loop():
                             "match_id": mid,
                             "winner_id": wid,
                             "frags": rt.frags,
-                            "reason": "completed",
+                            "reason": reason,
                         },
                     )
                     finished.append((mid, wid, "completed"))
@@ -124,30 +193,9 @@ async def run_loop():
                     pool.free(rt.port)
                     if rt.process.poll() is None:
                         rt.process.terminate()
-                    jf = OUT_DIR / f"{mid}.json"
-                    if jf.exists():
-                        jf.unlink(missing_ok=True)
+                    _cleanup_match_files(mid, out_root)
 
             await asyncio.sleep(4)
-
-
-def _dodger(rt: MatchRuntime) -> int:
-    if rt.sof_name_a.lower() in rt.connected:
-        return rt.player_b_id
-    if rt.sof_name_b.lower() in rt.connected:
-        return rt.player_a_id
-    return rt.player_a_id
-
-
-def _winner_from_json(path: Path, rt: MatchRuntime) -> int:
-    import json
-
-    data = json.loads(path.read_text())
-    fa = int(data.get("frags_a", data.get("frags_0", 0)))
-    fb = int(data.get("frags_b", data.get("frags_1", 0)))
-    if fa >= fb:
-        return rt.player_a_id
-    return rt.player_b_id
 
 
 def run():

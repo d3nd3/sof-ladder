@@ -18,8 +18,8 @@ class ApiClient:
                 raise RuntimeError(detail)
             return r.json() if r.content else {}
 
-    async def link(self, discord_id: str, sof_name: str):
-        return await self._req("POST", "/players/link", json={"discord_id": discord_id, "sof_name": sof_name})
+    async def link_start(self, discord_id: str):
+        return await self._req("POST", "/players/link/start", json={"discord_id": discord_id})
 
     async def get_player(self, discord_id: str):
         return await self._req("GET", f"/players/{discord_id}")

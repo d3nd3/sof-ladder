@@ -1,6 +1,8 @@
 import os
 import asyncio
 
+VERIFY_SERVER_PORT = int(os.getenv("VERIFY_SERVER_PORT", "28908"))
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -53,7 +55,7 @@ class LadderView(discord.ui.View):
         try:
             p = await api.get_player(str(interaction.user.id))
             msg = (
-                f"**{p.get('sof_name') or 'not linked'}**\n"
+                f"**{p.get('sof_name') or 'unverified'}** (uid `{p.get('ladder_uid') or '—'}`)\n"
                 f"Elo: **{p['elo']}**{_provisional(p['games_played'])}\n"
                 f"Games: {p['games_played']} | State: `{p['state']}`"
             )
@@ -92,7 +94,7 @@ async def refresh_ladder_embed(client: discord.Client):
     qc = await api.queue_count()
     embed = discord.Embed(
         title="SoF 1v1 Ladder",
-        description="Link with `/link <in_game_name>` then queue for ranked 1v1 DM.",
+        description="Use `/link` first — set `_sp_cl_info_*` cvars and join the verify server.",
         color=0xC41E3A,
     )
     embed.add_field(name="In queue", value=str(qc["count"]), inline=True)
@@ -211,14 +213,36 @@ async def poll_pending_offers():
         await asyncio.sleep(5)
 
 
-@bot.tree.command(name="link", description="Link your in-game SoF name")
-@app_commands.describe(sof_name="Your Soldier of Fortune player name")
-async def cmd_link(interaction: discord.Interaction, sof_name: str):
+@bot.tree.command(name="link", description="Verify your SoF client (SoFplus sp_sv_client_check)")
+async def cmd_link(interaction: discord.Interaction):
     try:
-        p = await api.link(str(interaction.user.id), sof_name)
-        await interaction.response.send_message(
-            f"Linked **{p['sof_name']}**. Elo: {p['elo']}", ephemeral=True
+        p = await api.link_start(str(interaction.user.id))
+        ip = settings.server_connect_ip
+        vport = VERIFY_SERVER_PORT
+        embed = discord.Embed(
+            title="Link your SoF client",
+            description=(
+                "Add these to your **game shortcut** or `autoexec.cfg` "
+                "(`_sp_cl_info_*` cvars are read by the server via SoFplus `sp_sv_client_check`):"
+            ),
+            color=0x3498DB,
         )
+        embed.add_field(
+            name="Launch cvars",
+            value=f"```\n{p['launch_cvars']}\n```",
+            inline=False,
+        )
+        embed.add_field(
+            name="Verify",
+            value=(
+                f"1. Start SoF with those cvars\n"
+                f"2. Connect to **`{ip}:{vport}`** (verify server, ~{p['verify_ttl_minutes']} min window)\n"
+                f"3. When verified, `/stats` shows linked — then queue"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="ladder_uid is assigned by the ladder; do not share it.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     except RuntimeError as e:
         await interaction.response.send_message(str(e), ephemeral=True)
 

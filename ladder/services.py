@@ -6,6 +6,7 @@ from ladder.config import settings
 from ladder.db import get_db
 from ladder.elo import apply_elo
 from ladder import penalties
+from ladder.identity import is_verified, start_link, get_player_by_ladder_uid
 
 
 def _now() -> str:
@@ -30,24 +31,14 @@ def get_or_create_player(discord_id: str) -> dict:
         return dict(row)
 
 
-def link_player(discord_id: str, sof_name: str) -> dict:
-    name = sof_name.strip()
-    if not name:
-        raise ValueError("sof_name required")
-    with get_db() as conn:
-        existing = conn.execute(
-            "SELECT id FROM players WHERE LOWER(sof_name)=LOWER(?) AND discord_id!=?",
-            (name, discord_id),
-        ).fetchone()
-        if existing:
-            raise ValueError("sof_name already linked")
-        get_or_create_player(discord_id)
-        conn.execute(
-            "UPDATE players SET sof_name=?, updated_at=? WHERE discord_id=?",
-            (name, _now(), discord_id),
-        )
-        row = conn.execute("SELECT * FROM players WHERE discord_id=?", (discord_id,)).fetchone()
-        return dict(row)
+def link_player(discord_id: str, sof_name: str | None = None) -> dict:
+    """Legacy name-only link removed; use start_link() + sp_sv_client_check verify."""
+    raise ValueError("use POST /players/link/start and verify via _sp_cl_info_* cvars")
+
+
+def link_start(discord_id: str) -> dict:
+    get_or_create_player(discord_id)
+    return start_link(discord_id)
 
 
 def get_player(discord_id: str) -> dict | None:
@@ -64,8 +55,8 @@ def queue_count() -> int:
 
 def join_queue(discord_id: str) -> dict:
     p = get_or_create_player(discord_id)
-    if not p.get("sof_name"):
-        raise ValueError("link sof_name first")
+    if not is_verified(p):
+        raise ValueError("complete /link first (verify server, _sp_cl_info_* cvars)")
     with get_db() as conn:
         penalties.clear_expired_cooldowns(conn)
         p = dict(conn.execute("SELECT * FROM players WHERE discord_id=?", (discord_id,)).fetchone())
