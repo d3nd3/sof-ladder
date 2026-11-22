@@ -1,8 +1,8 @@
 # SoF Ladder — 1v1 Ranked Matchmaking
 
-![SoF Ladder system overview](docs/system.svg)
-
 Ranked **1v1** matchmaking for **Soldier of Fortune**: one ladder account per player, Elo pairing, and a **fresh dedicated server** for each match.
+
+Prefer pictures? Start with **[HUMANS.md](HUMANS.md)**.
 
 ## What it does
 
