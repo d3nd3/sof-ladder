@@ -1,5 +1,6 @@
 # SoF Ladder — system overview (source of truth).
-# Render:  d2 --layout=tala --theme=0 --dark-theme=200 docs/system.d2 docs/system.svg
+# Render:  scripts/render-diagram.sh  (svg: light+dark, png: dark, for gpm desktop)
+# Colours come from the d2 theme, not hardcoded fills, so both light and dark render legibly.
 # Rule: if a program, endpoint, table, file handoff, or external service changes,
 # update this file in the same commit and re-render the SVG.
 
@@ -78,9 +79,9 @@ server.api -> state.db: "reads · writes"
 server.orch -> state.db: "drives matches"
 
 classes: {
-  store: {style.fill: "#e7f5ff"; style.stroke: "#1c7ed6"}
-  ext: {style.fill: "#f3f0ff"; style.stroke: "#7048e8"; style.stroke-dash: 3}
-  hot: {style.fill: "#fff3cd"; style.stroke: "#e8590c"}
+  store: {style.stroke: "#1c7ed6"; style.stroke-width: 2}
+  ext: {style.stroke: "#7048e8"; style.stroke-dash: 3}
+  hot: {style.stroke: "#e8590c"; style.stroke-width: 3}
 }
 
 state.db.class: store
