@@ -1,0 +1,89 @@
+# SoF Ladder — system overview (source of truth).
+# Render:  d2 --layout=tala --theme=0 --dark-theme=200 docs/system.d2 docs/system.svg
+# Rule: if a program, endpoint, table, file handoff, or external service changes,
+# update this file in the same commit and re-render the SVG.
+
+title: |md
+  **SoF Ladder** — 1v1 ranked matchmaking: Elo queue, both-accept, a fresh SoF server per match
+| {near: top-center}
+
+direction: right
+
+discord: Discord side {
+  player: player · /link · /queue · /accept · DMs
+  bot: Bot · discord.py {
+    ui: "#sof-ladder embed · DM buttons"
+    cmds: "/link · /accept · /stats · /cancel"
+  }
+}
+
+server: Server side · one game VPS {
+  api: API · FastAPI {
+    job: players · queue · matches · Elo
+    auth: "bot: bearer · orchestrator: secret header"
+  }
+  orch: Orchestrator {
+    spawn: "wine sofmp.exe on PORT_START…PORT_END"
+    watch: "tick_match · rcon · hub"
+    io: "read ladder_out/cmd/*.cfg + results"
+  }
+  servers: Game servers {
+    verify: "verify server :28908 · 15 min"
+    match: "one fresh match server per game"
+    sofplus: "SoFplus addons: check · cmd · match"
+  }
+}
+
+clients: In-game side {
+  client: SoF client {
+    uid: "_sp_cl_info_ladder_uid — permanent"
+    verify: "_sp_cl_info_ladder_verify — link only"
+  }
+}
+
+state: Shared code + state {
+  pkg: ladder/ package — imported by all three programs {
+    cfg: config · .env settings
+    rules: elo · identity · penalties · states
+    data: db · services
+    io: sof_paths · game_cmd
+  }
+  db: SQLite sof_ladder.db {
+    shape: cylinder
+    core: players · queue_entries · matches · match_players
+    audit: penalty_events · queue_join_log
+  }
+  out: ladder_out/ {
+    shape: cylinder
+    cmd: "cmd/*.cfg — in-game commands"
+    result: "per-match result files"
+  }
+}
+
+ext: External {
+  discordapi: Discord API {shape: cloud}
+}
+
+discord.player -> discord.bot: "slash cmds"
+discord.bot -> server.api: "REST · bearer token"
+discord.bot -> ext.discordapi: "gateway · DMs"
+
+server.orch -> server.api: "polls · secret header"
+server.orch -> server.servers: "spawn / kill"
+server.servers -> state.out: "writes results"
+server.orch -> state.out: "polls + consumes"
+clients.client -> server.servers: "connects to verify / match"
+
+server.api -> state.db: "reads · writes"
+server.orch -> state.db: "drives matches"
+
+classes: {
+  store: {style.fill: "#e7f5ff"; style.stroke: "#1c7ed6"}
+  ext: {style.fill: "#f3f0ff"; style.stroke: "#7048e8"; style.stroke-dash: 3}
+  hot: {style.fill: "#fff3cd"; style.stroke: "#e8590c"}
+}
+
+state.db.class: store
+state.out.class: store
+ext.discordapi.class: ext
+state.pkg.class: hot
